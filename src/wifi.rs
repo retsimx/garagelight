@@ -3,7 +3,8 @@ use core::convert::Infallible;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::{Stack, StackResources};
-use embassy_rp::gpio::{Flex, Output};
+use embassy_rp::gpio::{Flex, Level, Output};
+use embassy_rp::Peripherals;
 use embassy_rp::peripherals::{PIN_23, PIN_24, PIN_25, PIN_29};
 use embedded_hal_1::spi::ErrorType;
 use embedded_hal_async::spi::{ExclusiveDevice, SpiBusFlush, SpiBusRead, SpiBusWrite};
@@ -31,13 +32,16 @@ async fn net_task(stack: &'static Stack<cyw43::NetDevice<'static>>) -> ! {
     stack.run().await
 }
 
-pub async fn init_wifi<'a>(
-    pwr: Output<'static, PIN_23>,
-    cs: Output<'static, PIN_25>,
-    clk: Output<'static, PIN_29>,
-    mut dio: Flex<'static, PIN_24>,
+pub async fn init_wifi(
     spawner: Spawner
 ) -> &'static Stack<cyw43::NetDevice<'static>> {
+    let peripherals = unsafe { Peripherals::steal() };
+
+    let pwr = Output::new(peripherals.PIN_23, Level::Low);
+    let cs = Output::new(peripherals.PIN_25, Level::High);
+    let clk = Output::new(peripherals.PIN_29, Level::Low);
+    let mut dio = Flex::new(peripherals.PIN_24);
+
     // Include the WiFi firmware and Country Locale Matrix (CLM) blobs.
     let fw = include_bytes!("../lib/cyw43/firmware/43439A0.bin");
     let clm = include_bytes!("../lib/cyw43/firmware/43439A0_clm.bin");
@@ -73,7 +77,7 @@ pub async fn init_wifi<'a>(
     //});
 
     // Generate random seed
-    let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
+    let seed = env!("RANDOM_SEED").parse::<u64>().unwrap(); // chosen by fair dice roll. guarenteed to be random.
 
     // Init network stack
     let stack = &*singleton!(Stack::new(

@@ -1,5 +1,5 @@
-# Pico W Rust Garage Light
-Raspberry Pi Pico W Rust UDP server for turning on/off a light
+# Pico W Rust Garage Beam
+Raspberry Pi Pico W Rust UDP garage beam sensor for turning on/off a light via the garage light project.
 
 
 To build the project, create a .env file with the wifi details used by the wifi driver. eg:

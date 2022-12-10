@@ -9,7 +9,7 @@ mod wifi;
 use embassy_executor::Spawner;
 use embassy_net::{PacketMetadata};
 use embassy_net::udp::UdpSocket;
-use embassy_rp::gpio::{Flex, Level, Output};
+use embassy_rp::gpio::{Level, Output};
 use {defmt_rtt as _, panic_probe as _};
 use crate::wifi::init_wifi;
 
@@ -17,12 +17,9 @@ use crate::wifi::init_wifi;
 async fn main(spawner: Spawner) {
     let peripherals = embassy_rp::init(Default::default());
 
-    let pwr = Output::new(peripherals.PIN_23, Level::Low);
-    let cs = Output::new(peripherals.PIN_25, Level::High);
-    let clk = Output::new(peripherals.PIN_29, Level::Low);
-    let dio = Flex::new(peripherals.PIN_24);
+    let mut led = Output::new(peripherals.PIN_28 , Level::High);
 
-    let stack = init_wifi(pwr, cs, clk, dio, spawner).await;
+    let stack = init_wifi(spawner).await;
 
     let mut rx_meta = [PacketMetadata::EMPTY; 16];
     let mut rx_buffer = [0; 4096];
@@ -32,8 +29,6 @@ async fn main(spawner: Spawner) {
 
     let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
     socket.bind(8000).unwrap();
-
-    let mut led = Output::new(peripherals.PIN_28 , Level::High);
 
     loop {
         let (_n, _ep) = socket.recv_from(&mut buf).await.unwrap();

@@ -7,9 +7,9 @@
 mod wifi;
 
 use embassy_executor::Spawner;
-use embassy_net::{PacketMetadata};
-use embassy_net::udp::UdpSocket;
+use embassy_net::tcp::TcpSocket;
 use embassy_rp::gpio::{Level, Output};
+use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
 use crate::wifi::init_wifi;
 
@@ -21,23 +21,43 @@ async fn main(spawner: Spawner) {
 
     let stack = init_wifi(spawner).await;
 
-    let mut rx_meta = [PacketMetadata::EMPTY; 16];
+    while stack.config().is_none() {
+        Timer::after(Duration::from_secs(1)).await;
+    }
+
+    led.set_low();
+
     let mut rx_buffer = [0; 4096];
-    let mut tx_meta = [PacketMetadata::EMPTY; 16];
     let mut tx_buffer = [0; 4096];
     let mut buf = [0; 4096];
 
-    let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
-    socket.bind(8000).unwrap();
-
     loop {
-        let (_n, _ep) = socket.recv_from(&mut buf).await.unwrap();
+        Timer::after(Duration::from_secs(1)).await;
 
-        if buf[0] == 1 {
-            led.set_high()
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        socket.set_timeout(Some(embassy_net::SmolDuration::from_secs(10)));
+
+        if let Err(_) = socket.accept(8000).await {
+            continue;
         }
-        else {
-            led.set_low()
+
+        loop {
+            match socket.read(&mut buf).await {
+                Ok(0) => {
+                    break;
+                }
+                Ok(n) => n,
+                Err(_) => {
+                    break;
+                }
+            };
+
+            if buf[0] == 1 {
+                led.set_high()
+            }
+            else {
+                led.set_low()
+            }
         }
     }
 }

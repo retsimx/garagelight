@@ -4,113 +4,53 @@
 #![feature(async_fn_in_trait)]
 #![allow(incomplete_features)]
 
+use cyw43_pio::PioSpi;
+use embassy_executor::Spawner;
+use embassy_net::{IpEndpoint, Ipv4Address};
+use embassy_net::udp::{PacketMetadata, UdpSocket};
+use embassy_rp::bind_interrupts;
+use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::peripherals::PIO0;
+use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
+
+use crate::wifi::init_wifi;
+
 mod wifi;
 
-use cyw43::NetDevice;
-use embassy_executor::Spawner;
-use embassy_net::tcp::client::{TcpClient, TcpClientState, TcpConnection};
-use embassy_net::tcp::Error;
-use embassy_rp::gpio::{Input, Pull};
-use embassy_time::{Timer, Duration};
-use {defmt_rtt as _, panic_probe as _};
-use crate::wifi::init_wifi;
-use embassy_rp::peripherals::PIN_26;
-use embedded_io::asynch::Write;
-use embedded_nal_async::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpConnect};
+static REMOTE_ENDPOINT: IpEndpoint = IpEndpoint::new(embassy_net::IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 59)), 8000);
 
-static DEBOUNCE_MILLIS : u64 = 30;
-static mut PIN: Option<Input<PIN_26>> = Option::None;
-static mut CLIENT: Option<TcpClient<NetDevice, 1, 1024, 1024>> = Option::None;
-static REMOTE_ENDPOINT: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 20, 60), 8000));
-
-async fn update_light(state: bool, conn: &mut TcpConnection<'static, 1, 1024, 1024>) -> Result<usize, Error> {
-    let mut buf : [u8; 1] = [0];
-    if state {
-        buf[0] = 1;
-    }
-
-    return conn.write(&buf).await;
-}
-
-#[embassy_executor::task]
-async fn timer_check_task() -> ! {
-    unsafe {
-        loop {
-            let mut conn = match CLIENT.as_mut().unwrap().connect(REMOTE_ENDPOINT).await {
-                Ok(conn) => conn,
-                Err(_) => {
-                    Timer::after(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            loop {
-                match update_light(true, &mut conn).await {
-                    Ok(_) => {}
-                    Err(_) => break
-                }
-                Timer::after(Duration::from_secs(1)).await;
-
-                match update_light(false, &mut conn).await {
-                    Ok(_) => {}
-                    Err(_) => break
-                }
-                Timer::after(Duration::from_secs(1)).await;
-            }
-        }
-    }
-}
+bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => InterruptHandler<PIO0>;
+});
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let peripherals = embassy_rp::init(Default::default());
 
-    let stack = init_wifi(spawner).await;
+    let pwr = Output::new(peripherals.PIN_23, Level::Low);
+    let cs = Output::new(peripherals.PIN_25, Level::High);
+    let mut pio = Pio::new(peripherals.PIO0, Irqs);
+    let spi = PioSpi::new(&mut pio.common, pio.sm0, pio.irq0, cs, peripherals.PIN_24, peripherals.PIN_29, peripherals.DMA_CH0);
 
-    while stack.config().is_none() {
-        Timer::after(Duration::from_secs(1)).await;
-    }
+    let stack = init_wifi(pwr, spi, spawner).await;
 
-    unsafe {
-        PIN.replace(Input::new(peripherals.PIN_26, Pull::None));
-    }
+    let pin = Input::new(peripherals.PIN_26, Pull::None);
 
-    static STATE: TcpClientState<1, 1024, 1024> = TcpClientState::new();
-    unsafe { CLIENT.replace(TcpClient::new(&stack, &STATE)); }
+    let mut rx_meta = [PacketMetadata::EMPTY; 16];
+    let mut rx_buffer = [0; 4096];
+    let mut tx_meta = [PacketMetadata::EMPTY; 16];
+    let mut tx_buffer = [0; 4096];
 
-    // spawner.spawn(timer_check_task()).unwrap();
+    let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
+    socket.bind(8000).unwrap();
 
-    unsafe {
-        loop {
-            let mut conn = match CLIENT.as_mut().unwrap().connect(REMOTE_ENDPOINT).await {
-                Ok(conn) => conn,
-                Err(_) => {
-                    Timer::after(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            loop {
-                PIN.as_mut().unwrap().wait_for_low().await;
-                Timer::after(Duration::from_millis(DEBOUNCE_MILLIS)).await;
-                if PIN.as_mut().unwrap().is_high() {
-                    continue;
-                }
+    loop {
+        let buf : [u8; 1] = [if pin.is_low() {1} else {0}];
 
-                match update_light(true, &mut conn).await {
-                    Ok(_) => {}
-                    Err(_) => break
-                }
+        _ = socket.send_to(&buf, REMOTE_ENDPOINT).await;
 
-                PIN.as_mut().unwrap().wait_for_high().await;
-                Timer::after(Duration::from_millis(DEBOUNCE_MILLIS)).await;
-                if PIN.as_mut().unwrap().is_low() {
-                    continue;
-                }
-
-                match update_light(false, &mut conn).await {
-                    Ok(_) => {}
-                    Err(_) => break
-                }
-            }
-        }
+        Timer::after(Duration::from_millis(10)).await;
     }
 }

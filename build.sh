@@ -5,8 +5,6 @@ rustup component add llvm-tools-preview
 # Put WIFI_NETWORK and WIFI_PASSWORD in this file
 source .env
 
-export RANDOM_SEED=$(od -A n -t u8 -N 8 /dev/urandom | sed 's/ *$//g' | sed 's/^ *//g')
-
 mkdir -p build
 cargo build --release
 cargo objcopy --release -- -O binary build/garagebeam.bin

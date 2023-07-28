@@ -6,6 +6,7 @@ To build the project, create a .env file with the wifi details used by the wifi 
 ```
 export WIFI_NETWORK=myssid
 export WIFI_PASSWORD=mypassword
+export WIFI_SEED=123456789ABCDEF0 # Must be a 64bit hex value without a 0x prefix
 ```
 
 Then run `bash build.sh`.

@@ -7,6 +7,7 @@ use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_25};
 use embassy_rp::peripherals::PIO0;
 use static_cell::make_static;
 use embassy_futures::yield_now;
+use embassy_time::{Duration, Timer};
 
 #[embassy_executor::task]
 async fn wifi_task(
@@ -34,6 +35,8 @@ pub async fn init_wifi(
     unwrap!(spawner.spawn(wifi_task(runner)));
 
     control.init(clm).await;
+    control.gpio_set(0, true).await;
+
     control
         .set_power_management(cyw43::PowerManagementMode::None)
         .await;
@@ -49,6 +52,9 @@ pub async fn init_wifi(
     ));
 
     unwrap!(spawner.spawn(net_task(stack)));
+
+    Timer::after(Duration::from_secs(1)).await;
+    control.gpio_set(0, false).await;
 
     loop {
         match control.join_wpa2(env!("WIFI_NETWORK"), env!("WIFI_PASSWORD")).await {

@@ -4,6 +4,7 @@
 #![feature(async_fn_in_trait)]
 #![allow(incomplete_features)]
 
+use core::panic::PanicInfo;
 use cyw43_pio::PioSpi;
 use embassy_executor::Spawner;
 use embassy_net::{IpEndpoint, Ipv4Address};
@@ -12,10 +13,9 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_rp::watchdog::Watchdog;
 use embassy_time::{Duration, Timer};
-use {defmt_rtt as _, panic_probe as _};
-
-use crate::wifi::init_wifi;
+use {defmt_rtt as _};
 
 mod wifi;
 
@@ -25,16 +25,30 @@ bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
 });
 
+#[embassy_executor::task]
+async fn wdt(mut watchdog: Watchdog) -> ! {
+    watchdog.start(Duration::from_millis(500));
+
+    loop {
+        watchdog.feed();
+        Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let peripherals = embassy_rp::init(Default::default());
+
+    let watchdog = Watchdog::new(peripherals.WATCHDOG);
+
+    spawner.spawn(wdt(watchdog)).unwrap();
 
     let pwr = Output::new(peripherals.PIN_23, Level::Low);
     let cs = Output::new(peripherals.PIN_25, Level::High);
     let mut pio = Pio::new(peripherals.PIO0, Irqs);
     let spi = PioSpi::new(&mut pio.common, pio.sm0, pio.irq0, cs, peripherals.PIN_24, peripherals.PIN_29, peripherals.DMA_CH0);
 
-    let stack = init_wifi(pwr, spi, spawner).await;
+    let stack = wifi::init_wifi(pwr, spi, spawner).await;
 
     let pin = Input::new(peripherals.PIN_26, Pull::None);
 
@@ -53,4 +67,11 @@ async fn main(spawner: Spawner) {
 
         Timer::after(Duration::from_millis(10)).await;
     }
+}
+
+#[inline(never)]
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    // Watchdog timer won't be updated, causing a reset after some time
+    loop {}
 }

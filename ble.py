@@ -62,7 +62,7 @@ async def ble_task(light_pin):
                     else:
                         light_pin.on()
 
-                    await asyncio.sleep_ms(10)
+                    await asyncio.sleep_ms(5)
         except Exception as e:
             print(e)
             pass

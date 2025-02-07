@@ -1,12 +1,16 @@
+#!/bin/bash
+
+set -e
+
 mkdir -p /tmp/firmware
-sshfs root@10.0.1.5:/var/www/firmware /tmp/firmware
+sshfs root@10.2:/jails/containers/nginx/usr/local/www/firmware /tmp/firmware
 
 # Get old and new version numbers
-old_version=`cat /tmp/firmware/garagelight/version`
+old_version=$(cat /tmp/firmware/garagelight/version)
 new_version=$((old_version + 1))
 
 # Update to the new version number
-echo $new_version > /tmp/firmware/garagelight/version
+echo $new_version >/tmp/firmware/garagelight/version
 
 # Copy firmware files
 cp boot.py /tmp/firmware/garagelight/${new_version}_boot.py

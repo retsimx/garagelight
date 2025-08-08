@@ -3,7 +3,7 @@
 set -e
 
 mkdir -p /tmp/firmware
-sshfs root@10.2:/jails/containers/nginx/usr/local/www/firmware /tmp/firmware
+sshfs root@***REMOVED-HOST***:/usr/local/www/firmware /tmp/firmware
 
 # Get old and new version numbers
 old_version=$(cat /tmp/firmware/garagelight/version)

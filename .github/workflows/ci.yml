@@ -68,6 +68,14 @@ jobs:
       - name: Release build (workspace, thumbv6m)
         run: cargo build --release --target thumbv6m-none-eabi --workspace
 
+      - name: Clippy (radio_smoke bench, thumbv6m)
+        # The workspace steps above deliberately skip the feature-gated smoke
+        # binary; clippy it explicitly so the isolation test cannot rot.
+        run: cargo clippy --target thumbv6m-none-eabi --features radio-smoke --bin radio_smoke -- -D warnings
+
+      - name: Release build (radio_smoke bench, thumbv6m)
+        run: cargo build --release --target thumbv6m-none-eabi --features radio-smoke --bin radio_smoke
+
       - name: Assert a single bt-hci version
         shell: bash
         run: |

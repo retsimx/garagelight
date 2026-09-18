@@ -1,0 +1,12 @@
+[package]
+name = "garagelight-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "garagelight_core"
+path = "src/lib.rs"
+
+[dev-dependencies]
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

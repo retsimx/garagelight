@@ -27,6 +27,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Materialise dummy secrets
+        # rustfmt parses the whole workspace, so the app's `mod secrets;`
+        # needs the file even for these host-only checks.
+        run: cp app/secrets.example.rs app/src/secrets.rs
+
       - name: Format check
         run: cargo fmt --all --check
 

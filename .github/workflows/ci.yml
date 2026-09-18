@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: host (fmt, clippy, core tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy, llvm-tools-preview
+          targets: thumbv6m-none-eabi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (host core, all targets)
+        # .cargo/config.toml forces build.target = thumbv6m-none-eabi, so the
+        # host target must be named explicitly.
+        run: cargo clippy -p garagelight-core --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+
+      - name: Core host tests
+        run: cargo test -p garagelight-core --target x86_64-unknown-linux-gnu
+
+  firmware:
+    name: firmware (thumbv6m build, bt-hci, size gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy, llvm-tools-preview
+          targets: thumbv6m-none-eabi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Materialise dummy secrets
+        run: cp app/secrets.example.rs app/src/secrets.rs
+
+      - name: Clippy (workspace, thumbv6m)
+        run: cargo clippy --workspace --target thumbv6m-none-eabi -- -D warnings
+
+      - name: Release build (workspace, thumbv6m)
+        run: cargo build --release --target thumbv6m-none-eabi --workspace
+
+      - name: Assert a single bt-hci version
+        shell: bash
+        run: |
+          # `cargo tree -d` lists *duplicate packages across the tree*, not
+          # distinct versions, and renders bt-hci as many repeated tree nodes,
+          # so counting matches on its output is misleading. Count the distinct
+          # version strings across the full tree instead.
+          COUNT=$(cargo tree --target thumbv6m-none-eabi | grep -oE 'bt-hci v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | wc -l)
+          echo "distinct bt-hci versions: $COUNT"
+          test "$COUNT" -eq 1
+
+      - name: Install cargo-binutils
+        run: cargo install cargo-binutils --locked
+
+      - name: Size gate (text + data <= 780 KiB)
+        shell: bash
+        run: |
+          # 798720 = 780 * 1024. text + data is the flash-resident image, with
+          # all four CYW43 blobs counted.
+          SIZE=$(cargo size --release --target thumbv6m-none-eabi -p garagelight-app | awk '/garagelight-app$/ {print $1+$2}')
+          echo "firmware size (text+data): $SIZE bytes (budget 798720)"
+          test "$SIZE" -le 798720
+
+  contract:
+    name: contract (cross-repo byte equality)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare contract.toml with retsimx/garagebeam
+        shell: bash
+        run: |
+          URL=https://raw.githubusercontent.com/retsimx/garagebeam/main/contract.toml
+          code=$(curl -s -o /tmp/peer-contract.toml -w "%{http_code}" "$URL")
+          if [ "$code" = "404" ]; then
+            echo "::warning::sibling contract.toml not yet mirrored (HTTP 404) — skipping byte-equality check (bootstrap)"
+            exit 0
+          fi
+          if [ "$code" != "200" ]; then echo "::error::unexpected HTTP $code fetching $URL"; exit 1; fi
+          cmp -s contract.toml /tmp/peer-contract.toml || { echo "::error::contract.toml differs from sibling"; diff -u contract.toml /tmp/peer-contract.toml; exit 1; }

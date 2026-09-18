@@ -1,0 +1,21 @@
+[package]
+name = "garagelight-bootloader"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "garagelight-bootloader"
+path = "src/main.rs"
+
+[dependencies]
+# embassy-rp is only needed so the linker can find the stock `link-rp.x`
+# (which places the `.boot2` section). `rp2040` selects the RP2040 PAC;
+# `unstable-pac` makes the `embassy_rp::pac` re-export public so `main.rs` can
+# keep the `__INTERRUPTS` vector table on the link line (required when the
+# workspace build unifies in cortex-m-rt's `device` feature).
+embassy-rp = { workspace = true, features = ["rp2040", "unstable-pac"] }
+cortex-m = { workspace = true }
+cortex-m-rt = { workspace = true }
+# defmt is pulled in solely so its `defmt.x` linker script is on the search
+# path (build.rs passes `-Tdefmt.x`). No defmt logging is emitted here.
+defmt = { workspace = true }

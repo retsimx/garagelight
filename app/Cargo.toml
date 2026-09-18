@@ -1,0 +1,42 @@
+[package]
+name = "garagelight-app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "garagelight-app"
+path = "src/main.rs"
+
+[dependencies]
+garagelight-core = { workspace = true }
+
+[build-dependencies]
+# Host-only build dependency for fetching the (gitignored) CYW43 blobs at build
+# time. Pure-Rust TLS (rustls) so no system OpenSSL is required.
+ureq = "3"
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+# `boot2-none`: the app links `link.x` (not `link-rp.x`) and must not embed the
+# 256-byte second-stage bootloader; the GL-3 bootloader owns boot2.
+embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp2040", "boot2-none"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-net = { workspace = true, features = ["defmt", "tcp", "udp", "dns", "dhcpv4", "medium-ethernet"] }
+cyw43 = { workspace = true, features = ["defmt", "bluetooth", "firmware-logs"] }
+cyw43-pio = { workspace = true, features = ["defmt"] }
+bt-hci = { workspace = true }
+trouble-host = { workspace = true, features = ["peripheral", "gatt"] }
+embassy-boot-rp = { workspace = true }
+static_cell = { workspace = true }
+# thumbv6m has no atomic CAS; portable-atomic (used by static_cell) needs the
+# critical-section backend. Matches the upstream embassy-rp examples.
+portable-atomic = { version = "1.5", features = ["critical-section"] }
+sha2 = { workspace = true }
+minimq = { workspace = true }
+dht-sensor = { workspace = true }
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+panic-probe = { workspace = true }
+cortex-m = { workspace = true }
+cortex-m-rt = { workspace = true }

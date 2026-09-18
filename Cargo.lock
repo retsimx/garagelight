@@ -657,7 +657,7 @@ checksum = "347bc855bdbdf50ed9c5a1d80e8204badb0ba149b8732dde38e1e9708ed9d313"
 dependencies = [
  "defmt 1.1.1",
  "document-features",
- "embassy-net-driver 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-net-driver",
  "embassy-sync",
  "embassy-time",
  "embedded-io-async 0.7.0",
@@ -670,16 +670,10 @@ dependencies = [
 [[package]]
 name = "embassy-net-driver"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "524eb3c489760508f71360112bca70f6e53173e6fe48fc5f0efd0f5ab217751d"
-dependencies = [
- "defmt 0.3.100",
-]
-
-[[package]]
-name = "embassy-net-driver"
-version = "0.2.0"
 source = "git+https://github.com/embassy-rs/embassy.git?rev=3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a#3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a"
+dependencies = [
+ "defmt 1.1.1",
+]
 
 [[package]]
 name = "embassy-net-driver-channel"
@@ -687,7 +681,7 @@ version = "0.4.0"
 source = "git+https://github.com/embassy-rs/embassy.git?rev=3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a#3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a"
 dependencies = [
  "embassy-futures 0.1.2 (git+https://github.com/embassy-rs/embassy.git?rev=3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a)",
- "embassy-net-driver 0.2.0 (git+https://github.com/embassy-rs/embassy.git?rev=3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a)",
+ "embassy-net-driver",
  "embassy-sync",
 ]
 

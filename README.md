@@ -115,9 +115,12 @@ The app logs over **UART0 (GP0 TX) at 115200** and defmt/RTT: version, reset rea
 the four blob sizes.
 
 `garagelight-app` links at `0x10006000` as an ACTIVE-partition image with **no boot2** (the
-GL-3 bootloader owns boot2), so it cannot cold-boot from flash; `probe-rs run` downloads it
-over SWD and starts it. The `radio_smoke` bench binary runs the same way — see the bench
-runbook below.
+GL-3 bootloader owns boot2), so it cannot cold-boot from flash. `probe-rs run` only downloads
+the image and then **resets** the chip, so execution starts from the reset vector — and
+`0x10000000` is empty, so nothing runs. Until GL-3 provides a boot2, flash the patched stock
+boot2 shim once (see the bench runbook below); reflashing the app erases only the sectors from
+`0x10006000` up, so the shim at `0x10000000` survives. The `radio_smoke` bench binary runs the
+same way.
 
 ## Recovery / first provisioning (BOOTSEL / UF2)
 
@@ -129,8 +132,8 @@ There is no self-contained reset-to-bootloader path in GL-1. To recover a bricke
 
 Note that GL-1's `garagelight-app` is an **ACTIVE-partition image** linked at
 `0x10006000` (780 KiB). The real bootloader, partition table and UF2 flow arrive with
-**GL-3**; until then the app is normally run over SWD (above), which sets the program
-counter directly.
+**GL-3**; until then the app is run over SWD (above) after flashing the boot2 shim once —
+`probe-rs run` resets the chip and does not jump to the ELF entry point by itself.
 
 ## CYW43 firmware blobs
 
@@ -206,10 +209,16 @@ with the Raspberry Pi `debugprobe` firmware and wired as the SWD probe for the t
 
 **Flash the probe**
 
-1. Download `debugprobe_on_pico_w.uf2` from
-   <https://github.com/raspberrypi/debugprobe/releases>.
+1. Download `debugprobe_on_pico.uf2` from
+   <https://github.com/raspberrypi/debugprobe/releases> — the releases have no Pico W
+   build; the Pico build works unchanged on a Pico W.
 2. Hold **BOOTSEL**, plug the probe Pico W into USB; a `RPI-RP2` volume appears.
-3. Drag `debugprobe_on_pico_w.uf2` onto the `RPI-RP2` volume.
+3. Drag `debugprobe_on_pico.uf2` onto the `RPI-RP2` volume.
+
+The probe enumerates as `2e8a:000c  Raspberry Pi Debugprobe on Pico (CMSIS-DAP)` with a
+`ttyACM0` UART bridge. On a Pico W its onboard LED stays dark — the Pico build drives GP25,
+which is the wireless CS on a W, and the W LED sits behind the wireless chip. That is
+expected, not a fault.
 
 **Wiring (probe → target)**
 
@@ -234,13 +243,23 @@ confirms the device is visible).
 
 **Build and run**
 
-The ACTIVE app links at `0x10006000` with **no boot2** (the GL-3 bootloader owns boot2), so
-it cannot cold-boot from flash. `probe-rs run` downloads the image over SWD and starts it:
+The ACTIVE app links at `0x10006000` with **no boot2** (the GL-3 bootloader owns boot2), so it
+cannot cold-boot from flash. `probe-rs run` downloads the image but then **resets** the chip,
+so execution starts from the reset vector where `0x10000000` is empty. Flash the boot2 shim
+once first, then run:
 
 ```sh
+python3 scripts/boot2_shim.py --output /tmp/boot2_shim.bin
+probe-rs download --chip RP2040 --binary-format bin --base-address 0x10000000 /tmp/boot2_shim.bin
 cargo build --release --target thumbv6m-none-eabi --features radio-smoke --bin radio_smoke
 probe-rs run --chip RP2040 target/thumbv6m-none-eabi/release/radio_smoke
 ```
+
+`scripts/boot2_shim.py` patches the stock `boot2_w25q080.padded.bin` (from the `rp2040-boot2`
+crate already in the dependency graph) to jump to the app at `0x10006000`. Reflashing the app
+erases only the sectors from `0x10006000` up, so the shim at `0x10000000` survives across runs
+and only needs flashing once. This shim is a bring-up workaround for GL-1/GL-2 and is replaced
+by the real bootloader in GL-3 — hence the reset behaviour above.
 
 (`cargo run --release -p garagelight-app --features radio-smoke --bin radio_smoke` is the
 shorthand — the `.cargo/config.toml` runner already passes `--chip RP2040`.)

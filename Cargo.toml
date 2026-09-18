@@ -1,0 +1,46 @@
+[workspace]
+members = ["core", "app", "bootloader"]
+resolver = "2"
+
+[workspace.dependencies]
+embassy-rp = { version = "0.10", default-features = false }
+embassy-executor = { version = "0.10", default-features = false }
+embassy-time = { version = "0.5", default-features = false }
+embassy-sync = { version = "0.8", default-features = false }
+embassy-net = { version = "0.9", default-features = false }
+cyw43 = { version = "0.7", default-features = false }
+cyw43-pio = { version = "0.10", default-features = false }
+bt-hci = { version = "0.10", default-features = false }
+trouble-host = { version = "0.8", default-features = false }
+embassy-boot-rp = { version = "0.10", default-features = false }
+static_cell = "2"
+sha2 = { version = "0.11", default-features = false }
+minimq = { version = "0.13", default-features = false }
+defmt = "1"
+defmt-rtt = "1"
+panic-probe = { version = "1", features = ["print-defmt"] }
+cortex-m = "0.7.6"
+cortex-m-rt = "0.7"
+dht-sensor = "0.3"
+garagelight-core = { path = "core" }
+
+[patch.crates-io]
+cyw43 = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = 2
+incremental = false
+overflow-checks = false
+
+[profile.dev]
+debug = 2
+opt-level = 1
+overflow-checks = true

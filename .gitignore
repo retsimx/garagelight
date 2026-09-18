@@ -1,4 +1,22 @@
-venv
-.idea/
+# Build output
+target/
 
+# Local planning/design asset (not committed)
+docs/plans/
+
+# Build-time fetched proprietary CYW43 blobs
+app/cyw43-firmware/
+
+# Local secrets materialised from secrets.example.rs
+app/src/secrets.rs
+
+# Legacy MicroPython virtualenv
+venv
+
+# Local agent harness (rules, skills, results)
 .agents/
+
+# Editor / environment
+.idea/
+.env
+build/

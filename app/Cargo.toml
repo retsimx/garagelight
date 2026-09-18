@@ -3,9 +3,17 @@ name = "garagelight-app"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+radio-smoke = []
+
 [[bin]]
 name = "garagelight-app"
 path = "src/main.rs"
+
+[[bin]]
+name = "radio_smoke"
+path = "src/bin/radio_smoke.rs"
+required-features = ["radio-smoke"]
 
 [dependencies]
 garagelight-core = { workspace = true }

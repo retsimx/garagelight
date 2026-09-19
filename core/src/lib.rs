@@ -5,6 +5,7 @@ pub mod contract;
 pub mod lamp;
 pub mod layout;
 pub mod sensor;
+pub mod telemetry;
 
 #[cfg(test)]
 mod tests;
@@ -27,4 +28,8 @@ pub use layout::{
 pub use sensor::{
     in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,
     SAMPLE_INTERVAL_SECS,
+};
+pub use telemetry::{
+    classify_inbound, encode_sample, parse_broker, Inbound, BROKER_PORT, CLIENT_ID, KEEPALIVE_SECS,
+    MAX_SAMPLE_PAYLOAD, RESET_TOPIC,
 };

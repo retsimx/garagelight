@@ -223,6 +223,102 @@ trigger re-checks).
   detects **accidental corruption only** — it is fetched from the same unauthenticated server,
   so it is not tamper detection.
 
+### Release / OTA publishing
+
+The published version is the single bare integer in the repo-root `VERSION` file. Bumping it
+is an explicit repository commit; `deploy.sh` only reads `VERSION` and never increments it.
+
+Release procedure — bump `VERSION`, commit, then deploy:
+
+```sh
+# edit VERSION, e.g. 12 -> 13
+git add VERSION && git commit -m "release: VERSION 13"
+./deploy.sh
+```
+
+`deploy.sh` is fully environment-driven. These are required (names only; no committed values):
+
+| Variable | Meaning |
+|---|---|
+| `DEPLOY_PUBLISH_HOST` | `ssh`/`scp` target (e.g. `user@host`) |
+| `DEPLOY_PUBLISH_PATH` | remote base directory (nginx firmware root, e.g. `/path/to/firmware`) |
+| `DEPLOY_PROJECT` | remote project sub-directory (`OTA_PROJECT`, e.g. `garagelight`) |
+| `DEPLOY_MQTT_BROKER` | broker host for the reset trigger (e.g. `broker`) |
+
+These are optional, with their defaults:
+
+| Variable | Default |
+|---|---|
+| `DEPLOY_MQTT_PORT` | unset — `mosquitto_pub`'s own (1883) |
+| `DEPLOY_MQTT_USER` | unset (never echoed) |
+| `DEPLOY_MQTT_PASSWORD` | unset (never echoed) |
+| `DEPLOY_TRIGGER_TOPIC` | `garagelight/reset` |
+| `DEPLOY_TRIGGER_PAYLOAD` | `reset` |
+
+Example real run (placeholder values only):
+
+```sh
+DEPLOY_PUBLISH_HOST=user@host \
+DEPLOY_PUBLISH_PATH=/path/to/firmware \
+DEPLOY_PROJECT=garagelight \
+DEPLOY_MQTT_BROKER=broker \
+./deploy.sh
+```
+
+Targets must never be committed — this is a public repository. Instead of exporting the
+variables, `deploy.sh` also loads an env file: `$SCRIPT_DIR/.env.deploy` if it exists, or
+the path given by `DEPLOY_ENV_FILE`. Example `.env.deploy` (placeholders only):
+
+```sh
+DEPLOY_PUBLISH_HOST=user@host
+DEPLOY_PUBLISH_PATH=/path/to/firmware
+DEPLOY_PROJECT=garagelight
+DEPLOY_MQTT_BROKER=broker
+# optional
+DEPLOY_MQTT_PORT=1883
+DEPLOY_MQTT_USER=user
+DEPLOY_MQTT_PASSWORD=secret
+DEPLOY_TRIGGER_TOPIC=garagelight/reset
+DEPLOY_TRIGGER_PAYLOAD=reset
+```
+
+`.env.deploy` is gitignored; restrict it to your user:
+
+```sh
+chmod 600 .env.deploy
+```
+
+Precedence: exported environment variables override values from the file, so
+`DEPLOY_PROJECT=other ./deploy.sh` beats the file's `DEPLOY_PROJECT`.
+
+Dry run — builds, extracts and hashes locally so the printed hash is real, but copies and
+publishes nothing and does not trigger the device:
+
+```sh
+./deploy.sh --dry-run
+```
+
+Publish order is deliberate: build → extract the raw ACTIVE-slot image
+(`rust-objcopy -O binary`) → SHA-256 → copy `${VERSION}.bin` and `${VERSION}.bin.sha256`,
+then publish `version` **last** → prune older pairs → trigger the reset over MQTT. The device
+only polls `version`, so publishing it last means a failed build or copy never advertises an
+incomplete release.
+
+After a successful publish the remote keeps the current pair and the immediately previous
+pair, so a device that read the old `version` during a deploy is not stranded.
+
+Prerequisite: `cargo-binutils`, which provides both `rust-objcopy` and `cargo size`:
+
+```sh
+cargo install cargo-binutils --locked
+```
+
+The remote host must have `bash` for the retention prune (`ssh … bash -s`). If `bash` is
+absent the prune warns and is skipped; the release and the device trigger still complete.
+
+Transition note: the legacy MicroPython artifacts under the same OTA path are retired, so the
+device must already be running the Rust image (GL-13 cutover).
+
 ## Recovery (BOOTSEL / UF2 and DFU)
 
 **BOOTSEL / UF2 mass-storage recovery.** The RP2040 ROM bootloader is always available, even

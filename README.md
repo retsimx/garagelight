@@ -6,8 +6,8 @@ The garage beam → lamp system: a beam breaks, the fact is published over BLE a
 telemetry, and the lamp reacts. This repository is the **Pico W firmware**, written in
 native Rust on `embassy-rp` for the RP2040. GL-1 stands up the buildable, flashable
 scaffold; GL-2 brings up the CYW43439 radio (WiFi + BLE coexistence); GL-3 installs the
-`embassy-boot-rp` A/B bootloader and the pinned flash partition table. WiFi join, DHT,
-MQTT and OTA behaviour arrive in later issues.
+`embassy-boot-rp` A/B bootloader and the pinned flash partition table. DHT, MQTT and OTA
+behaviour arrive in later issues.
 
 - Epic: [retsimx/garagelight#1](https://github.com/retsimx/garagelight/issues/1)
 - Bootstrap (GL-1): [retsimx/garagelight#2](https://github.com/retsimx/garagelight/issues/2)
@@ -263,9 +263,11 @@ the WiFi net driver, the `cyw43` control handle and the BLE controller:
   `app/src/radio.rs`); GL-5 builds the peripheral and GATT server on top of it (below).
 
 Production `main.rs` initialises the radio, starts the BLE peripheral and GATT server via
-`ble::spawn` (app/src/main.rs:74), **then** builds an `embassy_net::Stack` over the net
-driver (app/src/main.rs:78), spawns the net runner and toggles the LED once. It still does
-**not** join an AP or publish telemetry; that is GL-7.
+`ble::spawn` (app/src/main.rs:65), brings up the onboard-LED control path
+(app/src/main.rs:68-76), and **then** calls `net::spawn` (app/src/main.rs:80). `net::spawn`
+builds the `embassy_net::Stack` over the net driver, spawns the runner and the
+never-returning reconnect supervisor (app/src/net.rs:42-50). GL-7 joins the AP and supervises
+the link; MQTT and OTA remain later issues.
 
 ### BLE peripheral / GATT (GL-5)
 
@@ -286,6 +288,13 @@ independent of WiFi.
   ATT Write Requests are ignored and logged.
 - **Not done** — the peripheral never initiates a connection-parameter update, and there is
   no pairing, encryption or bonding.
+
+### WiFi station without DNS (GL-7)
+
+GL-7 adds the station join and reconnect supervisor, but builds `embassy-net` **without the
+`dns` feature**: nothing in the firmware resolves a hostname yet. Until hostname resolution
+lands with the consumer that needs it (MQTT in GL-8, OTA in GL-10), the configured
+`MQTT_BROKER` and `OTA_URL` must be **IP literals**, not hostnames.
 
 ### Dependency note — one embassy source
 

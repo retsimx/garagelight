@@ -5,20 +5,11 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 use embassy_executor::Spawner;
-use embassy_net::{Runner, StackResources};
 use embassy_rp::uart;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_time::{Duration, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
-use garagelight_app::{ble, blobs, logging, logln, update};
-use static_cell::StaticCell;
-
-const NET_SEED: u64 = 0x1234_5678_9abc_def0;
-
-#[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, cyw43::NetDriver<'static>>) -> ! {
-    runner.run().await
-}
+use garagelight_app::{ble, blobs, logging, logln, net, update};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -74,16 +65,8 @@ async fn main(spawner: Spawner) {
     ble::spawn(spawner, radio.ble);
     logln!("ble control path started");
 
-    static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
-    let (_stack, runner) = embassy_net::new(
-        radio.net_device,
-        embassy_net::Config::dhcpv4(Default::default()),
-        RESOURCES.init(StackResources::new()),
-        NET_SEED,
-    );
-    spawner.spawn(net_task(runner).unwrap());
-    logln!("net runner spawned");
-
+    // Bring up the onboard LED on the control path before WiFi starts, so the
+    // control path's liveness never depends on the network.
     let mut control = radio.control;
     logln!("led on");
     control.gpio_set(0, true).await;
@@ -91,6 +74,11 @@ async fn main(spawner: Spawner) {
     logln!("led off");
     control.gpio_set(0, false).await;
     Timer::after(Duration::from_millis(500)).await;
+
+    // Network is best-effort and starts strictly after the control path. GL-8
+    // (MQTT) and GL-10 (OTA) receive this handle and pass a copy to their tasks.
+    let _stack = net::spawn(spawner, control, radio.net_device);
+    logln!("net supervisor spawned");
 
     loop {
         Timer::after(Duration::from_secs(3600)).await;

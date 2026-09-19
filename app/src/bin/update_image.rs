@@ -42,7 +42,7 @@ async fn main(_spawner: Spawner) {
     logln!(
         "update_image active_base=0x{:x} version={} boot_state={}",
         garagelight_core::layout::ACTIVE_BASE,
-        garagelight_core::VERSION,
+        garagelight_app::VERSION,
         state
     );
 

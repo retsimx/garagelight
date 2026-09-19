@@ -10,12 +10,8 @@ use embassy_rp::uart;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_time::{Duration, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
-use garagelight_app::{blobs, logging, logln};
+use garagelight_app::{blobs, logging, logln, update};
 use static_cell::StaticCell;
-
-/// Watchdog timeout. Used for both the initial arm and every feed, so the two
-/// must stay equal or the watchdog fires early; one constant keeps them coupled.
-const WATCHDOG_PERIOD: Duration = Duration::from_secs(8);
 
 const NET_SEED: u64 = 0x1234_5678_9abc_def0;
 
@@ -54,8 +50,11 @@ async fn main(spawner: Spawner) {
         wifi + bt + nvram + clm
     );
 
-    wd.start(WATCHDOG_PERIOD);
-    spawner.spawn(watchdog_task(wd).unwrap());
+    // Arm and feed the one shared timeout, so the armed timeout and the flash
+    // feed cadence cannot drift apart.
+    wd.start(update::WATCHDOG_TIMEOUT);
+    update::init_watchdog(wd);
+    spawner.spawn(watchdog_task().unwrap());
 
     let radio = radio::init(
         spawner,
@@ -96,9 +95,9 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn watchdog_task(mut wd: Watchdog) -> ! {
+async fn watchdog_task() -> ! {
     loop {
-        wd.feed(WATCHDOG_PERIOD);
+        update::feed(update::WATCHDOG_TIMEOUT);
         Timer::after(Duration::from_millis(100)).await;
     }
 }

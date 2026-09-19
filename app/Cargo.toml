@@ -5,6 +5,8 @@ edition = "2021"
 
 [features]
 radio-smoke = []
+update-selftest = []
+selftest-broken = ["update-selftest"]
 
 [[bin]]
 name = "garagelight-app"
@@ -14,6 +16,16 @@ path = "src/main.rs"
 name = "radio_smoke"
 path = "src/bin/radio_smoke.rs"
 required-features = ["radio-smoke"]
+
+[[bin]]
+name = "update_selftest"
+path = "src/bin/update_selftest.rs"
+required-features = ["update-selftest"]
+
+[[bin]]
+name = "update_image"
+path = "src/bin/update_image.rs"
+required-features = ["update-selftest"]
 
 [dependencies]
 garagelight-core = { workspace = true }
@@ -35,7 +47,10 @@ cyw43 = { workspace = true, features = ["defmt", "bluetooth", "firmware-logs"] }
 cyw43-pio = { workspace = true, features = ["defmt"] }
 bt-hci = { workspace = true }
 trouble-host = { workspace = true, features = ["peripheral", "gatt"] }
-embassy-boot-rp = { workspace = true }
+embassy-boot = { workspace = true }
+embassy-embedded-hal = { workspace = true }
+embedded-storage = { workspace = true }
+embedded-storage-async = { workspace = true }
 static_cell = { workspace = true }
 # thumbv6m has no atomic CAS; portable-atomic (used by static_cell) needs the
 # critical-section backend. Matches the upstream embassy-rp examples.

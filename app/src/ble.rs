@@ -1,26 +1,17 @@
 //! BLE peripheral bring-up and the beam-fact handoff to the control path.
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use trouble_host::att::{AttClient, AttReq};
 use trouble_host::prelude::*;
 
 use crate::gatt::Server;
+use crate::lamp::{LampEvent, EVENTS};
 use crate::logln;
 use crate::radio::BleController;
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 3;
-
-/// Latest valid beam fact from the central. Single consumer: the control path.
-pub static BEAM_FACT: Signal<CriticalSectionRawMutex, garagelight_core::BeamFact> = Signal::new();
-
-/// Await the next valid beam fact (GL-6 consumes this).
-pub async fn wait_fact() -> garagelight_core::BeamFact {
-    BEAM_FACT.wait().await
-}
 
 static RESOURCES: StaticCell<
     HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX>,
@@ -119,6 +110,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
             Ok(conn) => conn,
             Err(_) => {
                 logln!("ble_advertise_stopped");
+                let _ = EVENTS.try_send(LampEvent::LinkDown);
                 continue;
             }
         };
@@ -130,6 +122,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
             }
             Err(_) => {
                 logln!("ble_gatt_err");
+                let _ = EVENTS.try_send(LampEvent::LinkDown);
                 continue;
             }
         };
@@ -138,6 +131,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
             match conn.next().await {
                 GattConnectionEvent::Disconnected { .. } => {
                     logln!("ble_disconnected");
+                    let _ = EVENTS.try_send(LampEvent::LinkDown);
                     break;
                 }
                 GattConnectionEvent::Gatt {
@@ -167,7 +161,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
                     match parsed {
                         Some(fact) => match event.accept() {
                             Ok(_) => {
-                                BEAM_FACT.signal(fact);
+                                let _ = EVENTS.try_send(LampEvent::Fact(fact));
                                 logln!("ble_fact value={}", first.unwrap_or(0));
                             }
                             Err(_) => logln!("ble_write_apply_err"),

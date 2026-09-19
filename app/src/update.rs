@@ -25,6 +25,8 @@ use embedded_storage::nor_flash::ErrorType;
 use embedded_storage_async::nor_flash::{NorFlash, ReadNorFlash};
 use static_cell::StaticCell;
 
+use crate::logln;
+
 /// RP2040 flash size handed to the driver (2 MiB).
 pub const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
@@ -183,4 +185,10 @@ impl Updater {
     pub async fn mark_dfu(&mut self) -> Result<(), FirmwareUpdaterError> {
         self.inner.mark_dfu().await
     }
+}
+
+/// Stub entry point for an OTA check. GL-10/GL-11 replace the body with
+/// `ota::trigger()`; the `garagelight/reset` subscription calls this.
+pub fn request_check() {
+    logln!("ota_check_requested");
 }

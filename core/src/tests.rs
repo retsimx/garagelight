@@ -1,3 +1,4 @@
+use core::net::Ipv4Addr;
 use std::collections::HashMap;
 
 use serde::Deserialize;
@@ -20,6 +21,9 @@ use crate::layout::{
 use crate::sensor::{
     in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,
     SAMPLE_INTERVAL_SECS,
+};
+use crate::telemetry::{
+    classify_inbound, encode_sample, parse_broker, Inbound, MAX_SAMPLE_PAYLOAD,
 };
 
 #[derive(Deserialize)]
@@ -546,4 +550,127 @@ fn sensor_negative_temperature_round_trips() {
 
     assert_eq!(result, Some(valid));
     assert_eq!(result.unwrap().temperature, -5);
+}
+
+#[test]
+fn telemetry_encode_sample_exact_bytes() {
+    let cases: [(Sample, &[u8]); 5] = [
+        (
+            Sample {
+                temperature: 25,
+                relative_humidity: 60,
+            },
+            b"{\"temp\": 25, \"humidity\": 60}",
+        ),
+        (
+            Sample {
+                temperature: -5,
+                relative_humidity: 40,
+            },
+            b"{\"temp\": -5, \"humidity\": 40}",
+        ),
+        (
+            Sample {
+                temperature: 25,
+                relative_humidity: 0,
+            },
+            b"{\"temp\": 25, \"humidity\": 0}",
+        ),
+        (
+            Sample {
+                temperature: 25,
+                relative_humidity: 100,
+            },
+            b"{\"temp\": 25, \"humidity\": 100}",
+        ),
+        (
+            Sample {
+                temperature: 0,
+                relative_humidity: 0,
+            },
+            b"{\"temp\": 0, \"humidity\": 0}",
+        ),
+    ];
+
+    for (sample, expected) in cases {
+        let mut out = [0u8; MAX_SAMPLE_PAYLOAD];
+        let len = encode_sample(sample, &mut out).expect("sample fits in MAX_SAMPLE_PAYLOAD");
+        assert_eq!(len, expected.len(), "length for {sample:?}");
+        assert_eq!(&out[..len], expected, "bytes for {sample:?}");
+    }
+}
+
+#[test]
+fn telemetry_encode_sample_exact_buffer_and_one_byte_short() {
+    let sample = Sample {
+        temperature: 25,
+        relative_humidity: 60,
+    };
+    let mut scratch = [0u8; MAX_SAMPLE_PAYLOAD];
+    let len = encode_sample(sample, &mut scratch).expect("sample fits");
+
+    let mut short = [0u8; MAX_SAMPLE_PAYLOAD];
+    assert_eq!(encode_sample(sample, &mut short[..len - 1]), None);
+    assert_eq!(encode_sample(sample, &mut short[..len]), Some(len));
+    assert_eq!(encode_sample(sample, &mut []), None);
+}
+
+#[test]
+fn telemetry_parse_broker_accepts_ipv4_with_optional_scheme_and_port() {
+    let cases: [(&str, Ipv4Addr, u16); 4] = [
+        ("192.168.1.10", Ipv4Addr::new(192, 168, 1, 10), 1883),
+        ("mqtt://192.168.1.10", Ipv4Addr::new(192, 168, 1, 10), 1883),
+        (
+            "mqtt://192.168.1.10:1883",
+            Ipv4Addr::new(192, 168, 1, 10),
+            1883,
+        ),
+        ("10.0.0.5:1884", Ipv4Addr::new(10, 0, 0, 5), 1884),
+    ];
+
+    for (input, host, port) in cases {
+        assert_eq!(parse_broker(input), Some((host, port)), "{input}");
+    }
+}
+
+#[test]
+fn telemetry_parse_broker_rejects_hostnames_malformed_and_ipv6() {
+    for input in [
+        "example.com",
+        "1.2.3",
+        "",
+        "mqtt://[fe80::1]:1883",
+        "192.168.1.10:notaport",
+        "192.168.1.10:0",
+    ] {
+        assert_eq!(parse_broker(input), None, "{input}");
+    }
+}
+
+#[test]
+fn telemetry_classify_inbound_exact_match() {
+    assert_eq!(
+        classify_inbound("garagelight/reset"),
+        Inbound::RequestUpdate
+    );
+    for topic in [
+        "garage/temperature",
+        "garagelight/resetx",
+        "garagelight/reset/extra",
+        "",
+    ] {
+        assert_eq!(classify_inbound(topic), Inbound::Ignore, "{topic}");
+    }
+}
+
+#[test]
+fn telemetry_max_sample_payload_holds_widest_sample() {
+    let widest = Sample {
+        temperature: -128,
+        relative_humidity: 255,
+    };
+    let mut out = [0u8; MAX_SAMPLE_PAYLOAD];
+    let len = encode_sample(widest, &mut out).expect("widest sample fits in MAX_SAMPLE_PAYLOAD");
+    assert_eq!(&out[..len], b"{\"temp\": -128, \"humidity\": 255}");
+    assert!(len <= MAX_SAMPLE_PAYLOAD);
 }

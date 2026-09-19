@@ -19,7 +19,7 @@ embedded-storage = "0.3"
 embedded-storage-async = "0.4"
 static_cell = "2"
 sha2 = { version = "0.11", default-features = false }
-minimq = { version = "0.13", default-features = false }
+minimq = { version = "=0.13.3", default-features = false }
 defmt = "1"
 defmt-rtt = "1"
 panic-probe = { version = "1", features = ["print-defmt"] }

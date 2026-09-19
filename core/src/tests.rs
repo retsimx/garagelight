@@ -9,6 +9,10 @@ use crate::contract::{
     KEEPALIVE_INTERVAL_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID, SERVICE_UUID_BYTES,
     VALUE_LEN_BYTES,
 };
+use crate::lamp::{
+    fault_level, LampEvent, LampMachine, FAULT_CYCLE_MS, FAULT_OFF1_MS, FAULT_OFF2_MS,
+    FAULT_ON1_MS, FAULT_ON2_MS,
+};
 use crate::layout::{
     ACTIVE_BASE, ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BYTES,
     FLASH_END, PAGE_BYTES, SPARE_BASE, SPARE_BYTES, STATE_BASE, STATE_BYTES, WRITE_BYTES,
@@ -88,6 +92,140 @@ fn value_rules() {
     assert_eq!(validate_write(1, 0x02), None);
     assert_eq!(validate_write(2, 0x00), None);
     assert_eq!(validate_write(0, 0x00), None);
+}
+
+#[test]
+fn fault_pattern_edges() {
+    assert!(fault_level(0), "cycle start is lit");
+    assert!(
+        fault_level(FAULT_ON1_MS - 1),
+        "first lit phase ends at 1500"
+    );
+    assert!(!fault_level(FAULT_ON1_MS), "1500 is the first dark edge");
+    assert!(!fault_level(FAULT_ON1_MS + FAULT_OFF1_MS - 1));
+    assert!(
+        fault_level(FAULT_ON1_MS + FAULT_OFF1_MS),
+        "1650 lights again"
+    );
+    assert!(fault_level(FAULT_ON1_MS + FAULT_OFF1_MS + FAULT_ON2_MS - 1));
+    assert!(
+        !fault_level(FAULT_ON1_MS + FAULT_OFF1_MS + FAULT_ON2_MS),
+        "1850 starts the second dark phase"
+    );
+    assert!(!fault_level(FAULT_CYCLE_MS - 1));
+    assert!(fault_level(FAULT_CYCLE_MS), "2000 wraps to the cycle start");
+    assert_eq!(
+        FAULT_ON1_MS + FAULT_OFF1_MS + FAULT_ON2_MS + FAULT_OFF2_MS,
+        FAULT_CYCLE_MS
+    );
+}
+
+#[test]
+fn fault_pattern_is_85_percent_lit_and_blinks_once_per_second() {
+    let lit = (0..FAULT_CYCLE_MS).filter(|&ms| fault_level(ms)).count() as u64;
+    assert_eq!(lit * 100, FAULT_CYCLE_MS * 85, "~85% lit over one cycle");
+
+    let window_ms = 2 * FAULT_CYCLE_MS;
+    let mut falling_edges = 0u64;
+    let mut prev = fault_level(0);
+    for ms in 1..window_ms {
+        let now = fault_level(ms);
+        if prev && !now {
+            falling_edges += 1;
+        }
+        prev = now;
+    }
+    assert_eq!(
+        falling_edges,
+        window_ms / 1000,
+        "one dark edge per second (1 flash/s)"
+    );
+}
+
+#[test]
+fn lamp_machine_scripted_timeline() {
+    let mut m = LampMachine::new();
+
+    // Boot, before any write: the fault pattern.
+    assert!(m.level(0));
+    assert!(!m.level(FAULT_ON1_MS));
+    assert!(m.level(FAULT_ON1_MS + FAULT_OFF1_MS));
+    assert!(!m.level(FAULT_ON1_MS + FAULT_OFF1_MS + FAULT_ON2_MS));
+    assert!(m.level(FAULT_CYCLE_MS));
+
+    // 0x01 (Broken) -> lit immediately, fault cleared.
+    m.apply(LampEvent::Fact(BeamFact::Broken), 2500);
+    assert!(m.level(2500));
+    assert!(
+        m.level(2500 + FAULT_ON1_MS),
+        "held lit, not the pattern's dark edge"
+    );
+
+    // 0x00 (Intact) -> dark immediately.
+    m.apply(LampEvent::Fact(BeamFact::Intact), 3000);
+    assert!(!m.level(3000));
+    assert!(!m.level(3000 + FAULT_CYCLE_MS));
+
+    // An invalid write (0x02) is ignored before any event reaches the machine.
+    assert_eq!(validate_write(1, 0x02), None);
+    assert!(!m.level(4000), "no event, no state change");
+
+    // Link loss -> fault immediately (LinkDown models the supervision timeout).
+    m.apply(LampEvent::LinkDown, 5000);
+    assert!(m.level(5000));
+    assert!(
+        !m.level(5000 + FAULT_ON1_MS),
+        "fault pattern resumes from the link-down instant"
+    );
+
+    // Reconnect + write -> fault clears and the fact drives.
+    m.apply(LampEvent::Fact(BeamFact::Broken), 7000);
+    assert!(m.level(7000));
+    assert!(m.level(7000 + FAULT_CYCLE_MS));
+}
+
+#[test]
+fn lamp_machine_leash_faults_at_exactly_30s() {
+    let leash = u64::from(LEASH_TIMEOUT_MS);
+    let mut m = LampMachine::new();
+    m.apply(LampEvent::Fact(BeamFact::Broken), 0);
+
+    // 29_999 ms of live silence -> held (still the fact).
+    m.apply(LampEvent::Tick, leash - 1);
+    assert!(m.level(leash - 1));
+    assert!(
+        m.level(leash - 1 + FAULT_ON1_MS),
+        "held lit, not the fault pattern"
+    );
+
+    // 30_000 ms -> leash fault; the lamp now follows the pattern.
+    m.apply(LampEvent::Tick, leash);
+    assert!(m.level(leash));
+    assert!(
+        !m.level(leash + FAULT_ON1_MS),
+        "the pattern's dark edge proves the fault, not a held fact"
+    );
+}
+
+#[test]
+fn late_tick_does_not_overwrite_fresh_fact() {
+    let mut m = LampMachine::new();
+    m.apply(LampEvent::Fact(BeamFact::Intact), 1234);
+    m.apply(LampEvent::Tick, 1234);
+    assert!(
+        !m.level(1234),
+        "a tick at the fact's instant keeps the fact's level"
+    );
+    assert!(!m.level(1234 + FAULT_CYCLE_MS));
+
+    let mut m = LampMachine::new();
+    m.apply(LampEvent::Fact(BeamFact::Broken), 1234);
+    m.apply(LampEvent::Tick, 1234);
+    assert!(m.level(1234));
+    assert!(
+        m.level(1234 + FAULT_ON1_MS),
+        "held lit instead of the pattern's dark edge"
+    );
 }
 
 #[test]

@@ -3,6 +3,8 @@
 pub mod ble;
 pub mod blobs;
 pub mod gatt;
+pub mod highpri;
+pub mod lamp;
 pub mod logging;
 pub mod net;
 pub mod radio;

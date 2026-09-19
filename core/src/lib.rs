@@ -2,6 +2,7 @@
 
 pub mod budget;
 pub mod contract;
+pub mod lamp;
 pub mod layout;
 pub mod sensor;
 
@@ -14,6 +15,10 @@ pub use contract::{
     CONN_SLAVE_LATENCY, CONN_SUPERVISION_TIMEOUT_MS, FACT_BROKEN, FACT_INTACT, INITIAL_READ_VALUE,
     KEEPALIVE_INTERVAL_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID, SERVICE_UUID_BYTES,
     VALUE_LEN_BYTES,
+};
+pub use lamp::{
+    fault_level, LampEvent, LampMachine, FAULT_CYCLE_MS, FAULT_OFF1_MS, FAULT_OFF2_MS,
+    FAULT_ON1_MS, FAULT_ON2_MS, LAMP_ON_LEVEL,
 };
 pub use layout::{
     ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BASE, FLASH_BYTES,

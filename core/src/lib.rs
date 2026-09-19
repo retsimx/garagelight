@@ -3,6 +3,7 @@
 pub mod budget;
 pub mod contract;
 pub mod layout;
+pub mod sensor;
 
 #[cfg(test)]
 mod tests;
@@ -17,4 +18,8 @@ pub use contract::{
 pub use layout::{
     ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BASE, FLASH_BYTES,
     FLASH_END, PAGE_BYTES, SPARE_BASE, SPARE_BYTES, STATE_BASE, STATE_BYTES, WRITE_BYTES,
+};
+pub use sensor::{
+    in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,
+    SAMPLE_INTERVAL_SECS,
 };

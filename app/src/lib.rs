@@ -1,6 +1,8 @@
 #![no_std]
 
+pub mod ble;
 pub mod blobs;
+pub mod gatt;
 pub mod logging;
 pub mod radio;
 #[allow(dead_code)]

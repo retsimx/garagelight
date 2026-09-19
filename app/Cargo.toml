@@ -46,7 +46,7 @@ embassy-net = { workspace = true, features = ["defmt", "tcp", "udp", "dns", "dhc
 cyw43 = { workspace = true, features = ["defmt", "bluetooth", "firmware-logs"] }
 cyw43-pio = { workspace = true, features = ["defmt"] }
 bt-hci = { workspace = true }
-trouble-host = { workspace = true, features = ["peripheral", "gatt"] }
+trouble-host = { workspace = true, features = ["peripheral", "gatt", "derive", "default-packet-pool"] }
 embassy-boot = { workspace = true }
 embassy-embedded-hal = { workspace = true }
 embedded-storage = { workspace = true }

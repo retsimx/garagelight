@@ -7,12 +7,17 @@
 //! `garagelight_core::ota::*` surface:
 //!
 //! - [`http`] — the response-head parser,
-//! - [`session`] — the streaming [`apply_update`] session.
+//! - [`session`] — the streaming [`apply_update`] session,
+//! - [`selftest`] — the post-swap self-test window and verdict.
 
 mod http;
+mod selftest;
 mod session;
 
 pub use http::{HeadError, HeadEvent, HeadParser, ResponseHead};
+pub use selftest::{
+    self_test, Clock, Probe, Report, Signals, Verdict, SELF_TEST_POLL_MS, SELF_TEST_WINDOW_MS,
+};
 pub use session::{apply_update, BodyReader, Flasher, UpdateError};
 
 pub const CHUNK_BYTES: usize = 4096;

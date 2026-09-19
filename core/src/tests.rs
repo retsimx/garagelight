@@ -21,8 +21,8 @@ use crate::layout::{
 };
 use crate::ota::{
     apply_update, base64, basic_authorization, decide, parse_sha256_hex, parse_url, parse_version,
-    BodyReader, Decision, Flasher, HeadError, HeadEvent, HeadParser, ResponseHead, UpdateError,
-    UrlError, CHUNK_BYTES,
+    self_test, BodyReader, Clock, Decision, Flasher, HeadError, HeadEvent, HeadParser, Probe,
+    ResponseHead, Signals, UpdateError, UrlError, Verdict, CHUNK_BYTES, SELF_TEST_WINDOW_MS,
 };
 use crate::sensor::{
     in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,
@@ -1154,4 +1154,113 @@ fn apply_update_streams_multiple_chunks_in_order() {
     );
     assert!(flasher.writes().iter().all(|(_, n)| *n <= CHUNK_BYTES));
     assert_eq!(flasher.marks(), 1);
+}
+
+fn signal(ble: bool, lamp: bool, wifi: bool, mqtt: bool) -> Signals {
+    Signals {
+        ble_advertising: ble,
+        lamp_ready: lamp,
+        wifi_associated: wifi,
+        mqtt_connected: mqtt,
+    }
+}
+
+struct ScriptedProbe {
+    timeline: Vec<Signals>,
+    calls: usize,
+}
+
+impl ScriptedProbe {
+    fn new(timeline: Vec<Signals>) -> Self {
+        Self { timeline, calls: 0 }
+    }
+}
+
+impl Probe for ScriptedProbe {
+    fn sample(&mut self) -> Signals {
+        assert!(
+            !self.timeline.is_empty(),
+            "probe timeline must not be empty"
+        );
+        let last = self.timeline.len() - 1;
+        let idx = self.calls.min(last);
+        self.calls += 1;
+        self.timeline[idx]
+    }
+}
+
+struct VirtualClock {
+    now: u64,
+}
+
+impl VirtualClock {
+    fn new() -> Self {
+        Self { now: 0 }
+    }
+}
+
+impl Clock for VirtualClock {
+    fn now_ms(&self) -> u64 {
+        self.now
+    }
+
+    async fn wait(&mut self, ms: u64) {
+        self.now += ms;
+    }
+}
+
+#[test]
+fn self_test_confirms_when_mandatory_pass() {
+    let mut probe = ScriptedProbe::new(vec![signal(true, true, true, true)]);
+    let mut clock = VirtualClock::new();
+    let report = pollster::block_on(self_test(&mut probe, &mut clock));
+    assert_eq!(report.verdict, Verdict::Confirm);
+    assert!(report.ble_advertising);
+    assert!(report.lamp_ready);
+    assert!(report.elapsed_ms < SELF_TEST_WINDOW_MS);
+}
+
+#[test]
+fn self_test_reverts_at_window_when_mandatory_never_pass() {
+    let mut probe = ScriptedProbe::new(vec![signal(false, false, false, false)]);
+    let mut clock = VirtualClock::new();
+    let report = pollster::block_on(self_test(&mut probe, &mut clock));
+    assert_eq!(report.verdict, Verdict::Revert);
+    assert_eq!(report.elapsed_ms, SELF_TEST_WINDOW_MS);
+}
+
+#[test]
+fn self_test_confirms_with_network_down() {
+    let mut probe = ScriptedProbe::new(vec![signal(true, true, false, false)]);
+    let mut clock = VirtualClock::new();
+    let report = pollster::block_on(self_test(&mut probe, &mut clock));
+    assert_eq!(report.verdict, Verdict::Confirm);
+    assert!(!report.wifi_associated && !report.mqtt_connected);
+}
+
+#[test]
+fn self_test_waits_for_late_mandatory() {
+    let mut probe = ScriptedProbe::new(vec![
+        signal(false, true, true, true),
+        signal(false, true, true, true),
+        signal(false, true, true, true),
+        signal(true, true, true, true),
+    ]);
+    let mut clock = VirtualClock::new();
+    let report = pollster::block_on(self_test(&mut probe, &mut clock));
+    assert_eq!(report.verdict, Verdict::Confirm);
+    assert!(report.elapsed_ms < SELF_TEST_WINDOW_MS);
+}
+
+#[test]
+fn self_test_reverts_when_only_one_mandatory_holds() {
+    let mut lamp_only = ScriptedProbe::new(vec![signal(false, true, true, true)]);
+    let mut clock = VirtualClock::new();
+    let report = pollster::block_on(self_test(&mut lamp_only, &mut clock));
+    assert_eq!(report.verdict, Verdict::Revert);
+
+    let mut ble_only = ScriptedProbe::new(vec![signal(true, false, true, true)]);
+    let mut clock = VirtualClock::new();
+    let report = pollster::block_on(self_test(&mut ble_only, &mut clock));
+    assert_eq!(report.verdict, Verdict::Revert);
 }

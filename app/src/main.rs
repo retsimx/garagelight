@@ -10,7 +10,7 @@ use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_time::{Duration, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
 use garagelight_app::{
-    ble, blobs, highpri, lamp, logging, logln, net, ota, sensors, telemetry, update,
+    ble, blobs, highpri, lamp, logging, logln, net, ota, selftest, sensors, telemetry, update,
 };
 
 #[embassy_executor::main]
@@ -92,7 +92,8 @@ async fn main(spawner: Spawner) {
     telemetry::spawn(spawner, stack);
     logln!("mqtt telemetry spawned");
 
-    let updater = update::Updater::new(p.FLASH);
+    let mut updater = update::Updater::new(p.FLASH);
+    selftest::run(&mut updater).await;
     ota::spawn(spawner, stack, updater);
     logln!("ota task spawned");
     ota::trigger();

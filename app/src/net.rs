@@ -12,6 +12,8 @@
 //! passed by value rather than forced into a global behind a manual send marker.
 //! No global is needed.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use cyw43::{Control, JoinOptions, NetDriver};
 use embassy_executor::Spawner;
 use embassy_net::{Config, Runner, Stack, StackResources};
@@ -28,6 +30,15 @@ const BACKOFF_INITIAL_SECS: u64 = 1;
 const BACKOFF_MAX_SECS: u64 = 60;
 
 const NET_SEED: u64 = 0x1234_5678_9abc_def0;
+
+/// Set after DHCP config-up, cleared before a join and on link loss, so it
+/// reflects "currently associated and configured" (GL-11).
+static ASSOCIATED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the station is currently associated with a DHCP-configured address.
+pub fn associated() -> bool {
+    ASSOCIATED.load(Ordering::Relaxed)
+}
 
 /// Build the stack, spawn the runner and the supervisor, and return the `Copy`
 /// network handle for consumers (MQTT/OTA) to pass to their own tasks. Takes
@@ -63,6 +74,7 @@ async fn runner_task(mut runner: Runner<'static, NetDriver<'static>>) -> ! {
 async fn supervisor_task(mut control: Control<'static>, stack: Stack<'static>) -> ! {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
     loop {
+        ASSOCIATED.store(false, Ordering::Relaxed);
         logln!("wifi_associating ssid={}", secrets::WIFI_SSID);
         match control
             .join(
@@ -77,10 +89,12 @@ async fn supervisor_task(mut control: Control<'static>, stack: Stack<'static>) -
                 match embassy_time::with_timeout(DHCP_TIMEOUT, stack.wait_config_up()).await {
                     Ok(()) => {
                         if let Some(cfg) = stack.config_v4() {
+                            ASSOCIATED.store(true, Ordering::Relaxed);
                             let o = cfg.address.address().octets();
                             logln!("wifi_dhcp_up ip={}.{}.{}.{}", o[0], o[1], o[2], o[3]);
                         }
                         stack.wait_link_down().await;
+                        ASSOCIATED.store(false, Ordering::Relaxed);
                         logln!("wifi_lost");
                     }
                     Err(_) => {

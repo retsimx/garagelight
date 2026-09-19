@@ -223,6 +223,33 @@ trigger re-checks).
   detects **accidental corruption only** — it is fetched from the same unauthenticated server,
   so it is not tamper detection.
 
+### Post-swap self-test (GL-11)
+
+After the bootloader swaps DFU into ACTIVE, the new image **self-tests before confirming**.
+`get_state() == Swap` is true only on the first boot of a freshly swapped image, so the test
+runs exactly once per update; every other boot returns immediately.
+
+- **Mandatory (fail-closed)** — BLE advertising **and** the lamp subsystem applying the fact
+  it holds. Missing either one fails the image.
+- **Best-effort (log-only, never revert)** — WiFi association and MQTT connectivity. A good
+  image booting during an AP/broker outage is still confirmed.
+- **Deadline** — 30 s. The image confirms (`mark_booted()`) as soon as **both** mandatory
+  conditions are seen; if the window expires first it resets, and the bootloader reverts to
+  the previous image on the next reset.
+
+The single `core::ota::self_test` function owns the policy and is host-tested; `app/src/selftest.rs`
+is the thin adapter that samples the four subsystem flags. Expected log lines:
+
+```
+ota_selftest_start
+ota_selftest ble=… lamp=… wifi=… mqtt=… elapsed_ms=… verdict=…
+ota_selftest_confirmed
+ota_selftest_failed
+ota_boot state=boot|revert|dfu_detach|error
+```
+
+The `selftest-fail-ble` Cargo feature forces the BLE condition false for the bench revert test.
+
 ### Release / OTA publishing
 
 The published version is the single bare integer in the repo-root `VERSION` file. Bumping it

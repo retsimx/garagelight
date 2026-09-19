@@ -11,6 +11,7 @@ pub mod ota;
 pub mod radio;
 #[allow(dead_code)]
 pub mod secrets;
+pub mod selftest;
 pub mod sensors;
 pub mod telemetry;
 pub mod update;

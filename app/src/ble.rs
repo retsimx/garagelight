@@ -1,4 +1,6 @@
 //! BLE peripheral bring-up and the beam-fact handoff to the control path.
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
@@ -17,6 +19,14 @@ static RESOURCES: StaticCell<
     HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX>,
 > = StaticCell::new();
 static STACK: StaticCell<Stack<'static, BleController, DefaultPacketPool>> = StaticCell::new();
+
+/// Latched "the peripheral has started advertising at least once" (GL-11).
+static ADVERTISING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the BLE peripheral has started advertising at least once.
+pub fn advertising() -> bool {
+    ADVERTISING.load(Ordering::Relaxed)
+}
 
 /// Build the BLE stack and start the peripheral. Call before WiFi/OTA work.
 pub fn spawn(spawner: Spawner, controller: BleController) {
@@ -96,6 +106,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
     loop {
         let acceptor = match peripheral.advertise(&params, advertisement).await {
             Ok(acceptor) => {
+                ADVERTISING.store(true, Ordering::Relaxed);
                 logln!("ble_advertising");
                 acceptor
             }

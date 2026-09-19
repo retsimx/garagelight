@@ -7,6 +7,8 @@
 //! low-priority thread-mode task that only enqueues ticks — it never touches the
 //! pin.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_executor::{SendSpawner, Spawner};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::PIN_28;
@@ -21,6 +23,14 @@ use crate::logln;
 
 /// Ordered control events. Single consumer: the high-priority lamp task.
 pub static EVENTS: Channel<CriticalSectionRawMutex, LampEvent, 8> = Channel::new();
+
+/// Latched "the owner task has driven the pin at least once" (GL-11).
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// Whether the lamp subsystem is up and applying the fact it holds.
+pub fn ready() -> bool {
+    READY.load(Ordering::Relaxed)
+}
 
 /// The single owner of GPIO28 and of the lamp state machine.
 struct Lamp {
@@ -68,6 +78,7 @@ impl Lamp {
 async fn lamp_task(pin: Peri<'static, PIN_28>) {
     let mut lamp = Lamp::new(pin);
     lamp.drive(Instant::now().as_millis());
+    READY.store(true, Ordering::Relaxed);
     loop {
         let event = EVENTS.receive().await;
         let now = Instant::now().as_millis();

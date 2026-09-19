@@ -124,6 +124,14 @@ jobs:
       - name: Release build (broken candidate image, thumbv6m)
         run: cargo build --release --target thumbv6m-none-eabi --features update-selftest,selftest-broken --bin update_image
 
+      - name: Clippy (selftest-fail-ble app, thumbv6m)
+        # GL-11 forced-mandatory-failure build for the bench revert test; kept
+        # here so the feature-gated code path cannot rot.
+        run: cargo clippy --target thumbv6m-none-eabi --features selftest-fail-ble --bin garagelight-app -- -D warnings
+
+      - name: Release build (selftest-fail-ble app, thumbv6m)
+        run: cargo build --release --target thumbv6m-none-eabi --features selftest-fail-ble --bin garagelight-app
+
       - name: Assert a single bt-hci version
         shell: bash
         run: |

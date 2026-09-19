@@ -28,8 +28,9 @@ pub use layout::{
 };
 pub use ota::{
     apply_update, base64, basic_authorization, decide, parse_sha256_hex, parse_url, parse_version,
-    BodyReader, Decision, Flasher, HeadError, HeadEvent, HeadParser, ResponseHead, UpdateError,
-    Uri, UrlError, CHUNK_BYTES,
+    self_test, BodyReader, Clock, Decision, Flasher, HeadError, HeadEvent, HeadParser, Probe,
+    Report, ResponseHead, Signals, UpdateError, Uri, UrlError, Verdict, CHUNK_BYTES,
+    SELF_TEST_POLL_MS, SELF_TEST_WINDOW_MS,
 };
 pub use sensor::{
     in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,

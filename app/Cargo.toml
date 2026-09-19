@@ -7,6 +7,7 @@ edition = "2021"
 radio-smoke = []
 update-selftest = []
 selftest-broken = ["update-selftest"]
+selftest-fail-ble = []
 
 [[bin]]
 name = "garagelight-app"

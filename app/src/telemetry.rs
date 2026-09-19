@@ -22,6 +22,8 @@
 //!   replay state, but the SUBSCRIBE is retained until SUBACK; 512 is ~4x the
 //!   worst-case single encode.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{IpAddress, IpEndpoint, Stack};
@@ -55,6 +57,15 @@ const BACKOFF_MAX_SECS: u64 = 60;
 
 /// Reason a connection attempt ended, logged and used by the supervisor.
 type SessionEnd = &'static str;
+
+/// True while an MQTT session is connected to the broker, cleared when
+/// `connect_and_run` returns (GL-11).
+static CONNECTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the MQTT session is currently connected to the broker.
+pub fn connected() -> bool {
+    CONNECTED.load(Ordering::Relaxed)
+}
 
 /// Spawn the telemetry task, passing it the `Copy` network handle.
 pub fn spawn(spawner: Spawner, stack: Stack<'static>) {
@@ -93,6 +104,14 @@ async fn connect_and_run(
     session: &mut Session<'_>,
     stack: Stack<'static>,
 ) -> Result<(), SessionEnd> {
+    CONNECTED.store(false, Ordering::Relaxed);
+    let result = run_session(session, stack).await;
+    CONNECTED.store(false, Ordering::Relaxed);
+    result
+}
+
+/// One session attempt; see [`connect_and_run`].
+async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result<(), SessionEnd> {
     let (addr, port) = telemetry::parse_broker(secrets::MQTT_BROKER).ok_or_else(|| {
         logln!("mqtt_broker_invalid");
         "broker_invalid"
@@ -130,6 +149,7 @@ async fn connect_and_run(
 
     match conn.connect_event() {
         ConnectEvent::Connected => {
+            CONNECTED.store(true, Ordering::Relaxed);
             let filters = [TopicFilter::new(RESET_TOPIC)];
             let op = conn.subscribe(&filters, &[]).await.map_err(|_| {
                 logln!("mqtt_subscribe_failed");
@@ -163,7 +183,10 @@ async fn connect_and_run(
             }
         }
         // A resumed session already has the broker-side subscription.
-        ConnectEvent::Reconnected => logln!("mqtt_reconnected"),
+        ConnectEvent::Reconnected => {
+            CONNECTED.store(true, Ordering::Relaxed);
+            logln!("mqtt_reconnected");
+        }
     }
 
     loop {

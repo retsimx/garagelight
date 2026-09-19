@@ -9,7 +9,7 @@ use embassy_rp::uart;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_time::{Duration, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
-use garagelight_app::{ble, blobs, logging, logln, net, sensors, update};
+use garagelight_app::{ble, blobs, highpri, lamp, logging, logln, net, sensors, update};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -49,6 +49,11 @@ async fn main(spawner: Spawner) {
     // watchdog, before the radio.
     sensors::spawn_core1(p.CORE1, p.PIN_16);
     spawner.spawn(watchdog_task().unwrap());
+
+    // Control path first: the lamp owns GPIO28 on the high-priority executor and
+    // shows the boot fault pattern before the radio comes up.
+    let hi = highpri::start();
+    lamp::spawn(hi, spawner, p.PIN_28);
 
     let radio = radio::init(
         spawner,

@@ -283,11 +283,30 @@ independent of WiFi.
 - **Advertising** — `app/src/ble.rs` advertises as `glgt` (connectable scannable
   undirected), interval 30 ms, with the 128-bit service UUID in the advertising data and
   appearance `GENERIC_POWER_DEVICE`. After a disconnect it re-advertises automatically.
-- **Write handling** — a valid write is signalled to the control path through
-  `ble::BEAM_FACT` (`ble::wait_fact()`, consumed by GL-6). Invalid length/value writes and
-  ATT Write Requests are ignored and logged.
+- **Write handling** — a valid write is enqueued to the control path as a
+  `LampEvent::Fact` on the `EVENTS` channel in `app/src/lamp.rs`; every connection-end path
+  enqueues `LampEvent::LinkDown`. Invalid length/value writes and ATT Write Requests are
+  ignored and logged.
 - **Not done** — the peripheral never initiates a connection-parameter update, and there is
   no pairing, encryption or bonding.
+
+### Lamp control path (GL-6)
+
+GL-6 drives the lamp on GPIO28 from the validated beam fact and owns the "state unknown"
+fault indication.
+
+- **Mapping** — `0x01` (broken) lights the lamp, `0x00` (intact) darkens it.
+- **Fault pattern** — a 2 s cycle, ~85 % lit (`1500` on / `150` off / `200` on / `150` off
+  ms, 1 flash/s), shown at boot, on link loss (≤ 1 s supervision timeout) and on a 30 s
+  write-leash while connected. `app/src/ble.rs` enqueues `LampEvent::Fact`/`LinkDown`, and a
+  20 ms `Tick` keeps the leash current.
+- **Single owner** — one state machine (`core/src/lamp.rs`, pure, host-tested with an
+  injected clock) owns GPIO28 and consumes every event in `app/src/lamp.rs`.
+- **High-priority apply** — the owner runs on an `InterruptExecutor` (`SWI_IRQ_0`,
+  `Priority::P2`) so the apply preempts the radio runner; the fault tick is a separate
+  lower-priority core0 task that never touches the pin.
+- **Polarity unverified** — `LAMP_ON_LEVEL` (`true`, active-high) is a single constant; no
+  lamp is attached to the prototype, so the wiring polarity is confirmed at cutover.
 
 ### WiFi station without DNS (GL-7)
 

@@ -39,7 +39,7 @@ ureq = "3"
 # `boot2-none`: the app links `link.x` (not `link-rp.x`) and must not embed the
 # 256-byte second-stage bootloader; the GL-3 bootloader owns boot2.
 embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp2040", "boot2-none"] }
-embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-sync = { workspace = true, features = ["defmt"] }
 embassy-net = { workspace = true, features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet"] }

@@ -34,7 +34,7 @@ async fn main(spawner: Spawner) {
         None => "power-on-or-debugger",
     };
 
-    logln!("garagelight version={}", garagelight_core::VERSION);
+    logln!("garagelight version={}", garagelight_app::VERSION);
     logln!("reset_reason={}", reset_reason);
 
     let wifi = core::hint::black_box(blobs::WIFI_FW).len();

@@ -62,6 +62,43 @@ jobs:
       - name: Materialise dummy secrets
         run: cp app/secrets.example.rs app/src/secrets.rs
 
+      - name: Assert missing secrets.rs fails with an actionable message
+        shell: bash
+        run: |
+          # The build script must fail loudly when app/src/secrets.rs is absent
+          # and name the committed template. Force the script to re-run (its
+          # panic is what we assert on; with a warm cache the script would
+          # otherwise be skipped and rustc would fail first with E0583). Move
+          # the file aside, capture the exit code, always restore it, then
+          # assert the failure and its actionable message.
+          touch app/build.rs
+          mv app/src/secrets.rs /tmp/secrets.rs
+          set +e
+          cargo build --target thumbv6m-none-eabi -p garagelight-app > /tmp/missing-secrets.log 2>&1
+          CODE=$?
+          set -e
+          mv /tmp/secrets.rs app/src/secrets.rs
+          if [ "$CODE" -eq 0 ]; then
+            echo "::error::build succeeded without app/src/secrets.rs"
+            exit 1
+          fi
+          if ! grep -q "secrets.example.rs" /tmp/missing-secrets.log; then
+            echo "::error::failure message does not name secrets.example.rs"
+            cat /tmp/missing-secrets.log
+            exit 1
+          fi
+
+      - name: Assert build version env var is injected
+        shell: bash
+        run: |
+          # Force the build script to re-run so the injected value is current,
+          # then prove it equals the committed VERSION file.
+          touch app/build.rs
+          cargo build -vv --target thumbv6m-none-eabi -p garagelight-app 2>&1 | tee /tmp/version-build.log
+          # Anchor the match so a stale shorter value cannot satisfy a longer
+          # injection by prefix (e.g. VERSION=1 must not match ...=10).
+          grep -Eq "rustc-env=GARAGELIGHT_BUILD_VERSION=$(cat VERSION)([^0-9]|$)" /tmp/version-build.log
+
       - name: Clippy (workspace, thumbv6m)
         run: cargo clippy --workspace --target thumbv6m-none-eabi -- -D warnings
 

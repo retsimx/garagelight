@@ -101,6 +101,11 @@ cp app/secrets.example.rs app/src/secrets.rs
 cargo build --release --target thumbv6m-none-eabi
 ```
 
+The firmware version is the single bare integer in the repo-root `VERSION` file, which
+`app/build.rs` reads and injects as `GARAGELIGHT_BUILD_VERSION`; the running firmware reports
+it in the boot log. The build fails if `VERSION` is not a bare integer, or if
+`app/src/secrets.rs` is absent (the error names the `cp` above).
+
 Measure the image against the 780 KiB (798,720 B) budget:
 
 ```sh

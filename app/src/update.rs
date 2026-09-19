@@ -20,9 +20,10 @@ use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::Duration;
+use embassy_time::{Duration, Instant};
 use embedded_storage::nor_flash::ErrorType;
 use embedded_storage_async::nor_flash::{NorFlash, ReadNorFlash};
+use portable_atomic::{AtomicU32, Ordering};
 use static_cell::StaticCell;
 
 use crate::logln;
@@ -67,6 +68,26 @@ pub fn feed(timeout: Duration) {
     });
 }
 
+/// Longest single blocking flash operation observed, in microseconds (GL-10
+/// D12). This is the worst-case outage during which both cores are parked.
+static MAX_WINDOW_US: AtomicU32 = AtomicU32::new(0);
+
+/// Record the duration of one blocking flash operation against the maximum.
+fn record_window(t0: Instant) {
+    let us = t0.elapsed().as_micros() as u32;
+    MAX_WINDOW_US.fetch_max(us, Ordering::Relaxed);
+}
+
+/// Worst-case single-op flash window observed so far, in microseconds.
+pub fn max_window_us() -> u32 {
+    MAX_WINDOW_US.load(Ordering::Relaxed)
+}
+
+/// Clear the recorded maximum (for use by the bench between runs).
+pub fn reset_max_window() {
+    MAX_WINDOW_US.store(0, Ordering::Relaxed);
+}
+
 /// Async flash adapter over the RP2040 `Flash` driver that feeds the shared
 /// watchdog on every erase, write and read.
 pub struct DfuFlash {
@@ -91,7 +112,10 @@ impl ReadNorFlash for DfuFlash {
 
     async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
         feed(WATCHDOG_TIMEOUT);
-        self.flash.blocking_read(offset, bytes)
+        let t0 = Instant::now();
+        let result = self.flash.blocking_read(offset, bytes);
+        record_window(t0);
+        result
     }
 
     fn capacity(&self) -> usize {
@@ -109,7 +133,10 @@ impl NorFlash for DfuFlash {
         while addr < to {
             feed(WATCHDOG_TIMEOUT);
             let end = core::cmp::min(addr + page, to);
-            self.flash.blocking_erase(addr, end)?;
+            let t0 = Instant::now();
+            let result = self.flash.blocking_erase(addr, end);
+            record_window(t0);
+            result?;
             addr = end;
         }
         Ok(())
@@ -117,7 +144,10 @@ impl NorFlash for DfuFlash {
 
     async fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
         feed(WATCHDOG_TIMEOUT);
-        self.flash.blocking_write(offset, bytes)
+        let t0 = Instant::now();
+        let result = self.flash.blocking_write(offset, bytes);
+        record_window(t0);
+        result
     }
 }
 
@@ -187,8 +217,23 @@ impl Updater {
     }
 }
 
-/// Stub entry point for an OTA check. GL-10/GL-11 replace the body with
-/// `ota::trigger()`; the `garagelight/reset` subscription calls this.
+/// Entry point for an OTA check: the `garagelight/reset` subscription calls this.
 pub fn request_check() {
     logln!("ota_check_requested");
+    crate::ota::trigger();
+}
+
+/// Lets the pure `core` streaming session drive the hardware updater: the lazy
+/// per-sector-erase `write_firmware` path (D4) and the commit-only-
+/// after-hash-match `mark_updated`.
+impl garagelight_core::ota::Flasher for Updater {
+    type Error = FirmwareUpdaterError;
+
+    async fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), Self::Error> {
+        self.write_firmware(offset, data).await
+    }
+
+    async fn mark_updated(&mut self) -> Result<(), Self::Error> {
+        self.mark_updated().await
+    }
 }

@@ -104,10 +104,15 @@ rationale is the interesting part; the conclusions are what the tracker enforces
 - **Question**: the deployed OTA copies files with no integrity check and no rollback.
 - **Chosen**: an **A/B image with a trial boot**: the new image lands in the inactive slot, is
   SHA-256 verified, boots once, self-tests, and confirms itself — otherwise the bootloader reverts it.
+- **Transport** (as implemented in GL-10): **HTTPS / TLS 1.3 with certificate verification
+  deliberately disabled** (`embedded-tls` no-op verifier), **DNS** hostname resolution (an IPv4
+  literal is also accepted), and **HTTP Basic auth** from `secrets.rs`. The real endpoint is
+  HTTPS + Basic-auth only (port 80 redirects), so a plain GET cannot reach it; `http://` remains a
+  bench subset. The session is encrypted but **unauthenticated** — no trust chain is checked.
 - **Why**: the failure that matters is an image that boots but is functionally broken (no radio, no
   lamp). Rollback is the cheap insurance that makes an unattended device recoverable.
 - **Explicitly not claimed**: SHA-256 detects accidental corruption, not tampering (the hash comes
-  from the same unauthenticated server).
+  from the same unauthenticated server, reached over an unauthenticated TLS session).
 
 ### 11. Telemetry: keep MQTT, accept QoS 0
 

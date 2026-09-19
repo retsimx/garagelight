@@ -104,7 +104,7 @@ Full normative detail: [`garagelight#6`](https://github.com/retsimx/garagelight/
 | Boot ordering | Radio + BLE + lamp **first**; WiFi/OTA/mesh afterwards and asynchronously; **never reset because WiFi is down** |
 | Multicore | core0: radio, the BLE/GATT stack, the lamp apply, and the DFU writer. core1: the DHT11 read, telemetry formatting, logging. Cross-core via the chip's multicore-safe mutex |
 | Flash | An A/B bootloader with ACTIVE/DFU/state partitions; the radio firmware blobs are embedded per image and fetched at build time (proprietary, never committed) |
-| OTA | Version-gated, streamed, SHA-256 verified, written to the inactive slot, trial-booted, and **reverted on the next reset if the new image does not confirm** — bounded so a bad update cannot survive one reset |
+| OTA | Version-gated, streamed, SHA-256 verified, written to the inactive slot, trial-booted, and **reverted on the next reset if the new image does not confirm** — bounded so a bad update cannot survive one reset. Transport is **HTTPS / TLS 1.3 with certificate verification disabled** plus HTTP Basic auth, or `http://` as a bench subset; the host is resolved by **DNS** (an IPv4 literal is also accepted). The server must send `Content-Length` (chunked rejected); the image must fit the 780 KiB ACTIVE slot, checked **before any flash write** |
 | Telemetry | MQTT, topic and payload unchanged (parity with today), every 15 s, QoS 0 |
 
 ### Why the lamp gets a fault pattern, not just "off"
@@ -159,7 +159,9 @@ Honesty is part of the design record:
   assertion.
 - **Simultaneous WiFi + BLE on this board** is documented by the vendor but must be proven here.
 - **The OTA server's HTTP behaviour** (`Content-Length`, no chunked encoding) is an external
-  contract that must be verified against the real server.
+  contract that must be verified against the real server. The transport is encrypted but **not
+  authenticated** (certificate verification is deliberately disabled), so SHA-256 detects
+  accidental corruption only — not tampering.
 - **The broker's MQTT v5 support** is a stated environment requirement, checked before the telemetry
   issue is accepted.
 - **Host-only facts** (Bluetooth daemon configuration, GPIO chip identity, service coupling) are

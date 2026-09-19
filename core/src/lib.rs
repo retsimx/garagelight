@@ -4,6 +4,7 @@ pub mod budget;
 pub mod contract;
 pub mod lamp;
 pub mod layout;
+pub mod ota;
 pub mod sensor;
 pub mod telemetry;
 
@@ -24,6 +25,11 @@ pub use lamp::{
 pub use layout::{
     ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BASE, FLASH_BYTES,
     FLASH_END, PAGE_BYTES, SPARE_BASE, SPARE_BYTES, STATE_BASE, STATE_BYTES, WRITE_BYTES,
+};
+pub use ota::{
+    apply_update, base64, basic_authorization, decide, parse_sha256_hex, parse_url, parse_version,
+    BodyReader, Decision, Flasher, HeadError, HeadEvent, HeadParser, ResponseHead, UpdateError,
+    Uri, UrlError, CHUNK_BYTES,
 };
 pub use sensor::{
     in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,

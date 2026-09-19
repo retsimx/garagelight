@@ -8,14 +8,20 @@ name = "garagelight-bootloader"
 path = "src/main.rs"
 
 [dependencies]
-# embassy-rp is only needed so the linker can find the stock `link-rp.x`
-# (which places the `.boot2` section). `rp2040` selects the RP2040 PAC;
-# `unstable-pac` makes the `embassy_rp::pac` re-export public so `main.rs` can
-# keep the `__INTERRUPTS` vector table on the link line (required when the
-# workspace build unifies in cortex-m-rt's `device` feature).
-embassy-rp = { workspace = true, features = ["rp2040", "unstable-pac"] }
+# embassy-rp is needed for the stock `link-rp.x` (which places the `.boot2`
+# section) and for the flash/watchdog peripherals the bootloader drives.
+# `rp2040` selects the RP2040 PAC; `critical-section-impl` provides the chip's
+# multicore-safe critical section, which the flash driver requires. The
+# `__INTERRUPTS` vector table links whether or not the workspace build unifies
+# in embassy-rp's `rt` feature (rp-pac supplies it under `rt`, cortex-m-rt
+# supplies its own default table otherwise).
+embassy-rp = { workspace = true, features = ["rp2040", "critical-section-impl"] }
+embassy-boot-rp = { workspace = true }
+embassy-sync = { workspace = true }
+embassy-time = { workspace = true }
 cortex-m = { workspace = true }
 cortex-m-rt = { workspace = true }
-# defmt is pulled in solely so its `defmt.x` linker script is on the search
-# path (build.rs passes `-Tdefmt.x`). No defmt logging is emitted here.
+# defmt is pulled in so its `defmt.x` linker script is on the search path
+# (build.rs passes `-Tdefmt.x`); defmt-rtt provides the RTT transport.
 defmt = { workspace = true }
+defmt-rtt = { workspace = true }

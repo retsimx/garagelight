@@ -1036,12 +1036,15 @@ dependencies = [
  "defmt 1.1.1",
  "defmt-rtt",
  "dht-sensor",
- "embassy-boot-rp",
+ "embassy-boot",
+ "embassy-embedded-hal 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embassy-executor",
  "embassy-net",
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
+ "embedded-storage",
+ "embedded-storage-async",
  "garagelight-core",
  "minimq",
  "panic-probe",
@@ -1059,7 +1062,11 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "defmt 1.1.1",
+ "defmt-rtt",
+ "embassy-boot-rp",
  "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
 ]
 
 [[package]]

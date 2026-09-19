@@ -19,4 +19,5 @@ venv
 # Editor / environment
 .idea/
 .env
+/.env.deploy
 build/

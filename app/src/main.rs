@@ -9,7 +9,7 @@ use embassy_rp::uart;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_time::{Duration, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
-use garagelight_app::{ble, blobs, logging, logln, net, update};
+use garagelight_app::{ble, blobs, logging, logln, net, sensors, update};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -45,6 +45,9 @@ async fn main(spawner: Spawner) {
     // feed cadence cannot drift apart.
     wd.start(update::WATCHDOG_TIMEOUT);
     update::init_watchdog(wd);
+    // Core1 sampling is independent of radio bring-up; start it on the armed
+    // watchdog, before the radio.
+    sensors::spawn_core1(p.CORE1, p.PIN_16);
     spawner.spawn(watchdog_task().unwrap());
 
     let radio = radio::init(

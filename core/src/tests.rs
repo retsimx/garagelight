@@ -4,9 +4,10 @@ use serde::Deserialize;
 
 use crate::budget::{fits, ACTIVE_FLASH_BYTES, BLOB_TOTAL_BYTES, VERSION};
 use crate::contract::{
-    validate_write, BeamFact, CHARACTERISTIC_UUID, CONN_INTERVAL_US, CONN_SLAVE_LATENCY,
-    CONN_SUPERVISION_TIMEOUT_MS, FACT_BROKEN, FACT_INTACT, INITIAL_READ_VALUE,
-    KEEPALIVE_INTERVAL_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID, VALUE_LEN_BYTES,
+    validate_write, BeamFact, CHARACTERISTIC_UUID, CHARACTERISTIC_UUID_BYTES, CONN_INTERVAL_US,
+    CONN_SLAVE_LATENCY, CONN_SUPERVISION_TIMEOUT_MS, FACT_BROKEN, FACT_INTACT, INITIAL_READ_VALUE,
+    KEEPALIVE_INTERVAL_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID, SERVICE_UUID_BYTES,
+    VALUE_LEN_BYTES,
 };
 use crate::layout::{
     ACTIVE_BASE, ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BYTES,
@@ -50,6 +51,30 @@ fn contract_constants_match_file() {
     assert_eq!(KEEPALIVE_INTERVAL_MS, c.keepalive_interval_ms);
     assert_eq!(LEASH_TIMEOUT_MS, c.leash_timeout_ms);
     assert_eq!(MQTT_TOPIC, c.mqtt_topic.as_str());
+}
+
+fn uuid_string_from_le_bytes(bytes: [u8; 16]) -> String {
+    let be: Vec<u8> = bytes.iter().rev().copied().collect();
+    let hex = |range: std::ops::Range<usize>| -> String {
+        be[range].iter().map(|b| format!("{b:02x}")).collect()
+    };
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex(0..4),
+        hex(4..6),
+        hex(6..8),
+        hex(8..10),
+        hex(10..16)
+    )
+}
+
+#[test]
+fn uuid_bytes_match_strings() {
+    assert_eq!(uuid_string_from_le_bytes(SERVICE_UUID_BYTES), SERVICE_UUID);
+    assert_eq!(
+        uuid_string_from_le_bytes(CHARACTERISTIC_UUID_BYTES),
+        CHARACTERISTIC_UUID
+    );
 }
 
 #[test]

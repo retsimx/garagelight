@@ -10,7 +10,7 @@ use embassy_rp::uart;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_time::{Duration, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
-use garagelight_app::{blobs, logging, logln, update};
+use garagelight_app::{ble, blobs, logging, logln, update};
 use static_cell::StaticCell;
 
 const NET_SEED: u64 = 0x1234_5678_9abc_def0;
@@ -70,6 +70,9 @@ async fn main(spawner: Spawner) {
     )
     .await;
     logln!("radio initialized");
+
+    ble::spawn(spawner, radio.ble);
+    logln!("ble control path started");
 
     static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
     let (_stack, runner) = embassy_net::new(

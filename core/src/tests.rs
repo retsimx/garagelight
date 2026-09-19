@@ -13,6 +13,10 @@ use crate::layout::{
     ACTIVE_BASE, ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BYTES,
     FLASH_END, PAGE_BYTES, SPARE_BASE, SPARE_BYTES, STATE_BASE, STATE_BYTES, WRITE_BYTES,
 };
+use crate::sensor::{
+    in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,
+    SAMPLE_INTERVAL_SECS,
+};
 
 #[derive(Deserialize)]
 struct ContractFile {
@@ -273,4 +277,135 @@ fn strip_comments(text: &str) -> String {
         }
     }
     out
+}
+
+#[test]
+fn sensor_constants() {
+    assert_eq!(MAX_ATTEMPTS, 3);
+    assert_eq!(READ_STALL_US, 50_000);
+    assert_eq!(RETRY_SETTLE_MS, 1_000);
+    assert_eq!(SAMPLE_INTERVAL_SECS, 15);
+}
+
+#[test]
+fn sensor_in_range_boundaries() {
+    let at = |temperature: i8, relative_humidity: u8| Sample {
+        temperature,
+        relative_humidity,
+    };
+
+    for temperature in [-20, 0, 50, 60] {
+        assert!(in_range(at(temperature, 50)), "temp {temperature}");
+    }
+    for temperature in [-21, 61, 127] {
+        assert!(!in_range(at(temperature, 50)), "temp {temperature}");
+    }
+    for relative_humidity in [0, 100] {
+        assert!(
+            in_range(at(25, relative_humidity)),
+            "rh {relative_humidity}"
+        );
+    }
+    for relative_humidity in [101, 255] {
+        assert!(
+            !in_range(at(25, relative_humidity)),
+            "rh {relative_humidity}"
+        );
+    }
+}
+
+#[test]
+fn sensor_succeeds_on_third_attempt() {
+    let valid = Sample {
+        temperature: 21,
+        relative_humidity: 45,
+    };
+    let script = [Attempt::Checksum, Attempt::Checksum, Attempt::Ok(valid)];
+    let mut calls = 0u32;
+
+    let result = read_with_retries(|| {
+        let attempt = script[calls as usize];
+        calls += 1;
+        attempt
+    });
+
+    assert_eq!(result, Some(valid));
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn sensor_exhausts_after_max_attempts() {
+    let mut calls = 0u32;
+
+    let result = read_with_retries(|| {
+        calls += 1;
+        Attempt::Checksum
+    });
+
+    assert_eq!(result, None);
+    assert_eq!(calls, u32::from(MAX_ATTEMPTS));
+}
+
+#[test]
+fn sensor_discards_stall_and_retries() {
+    let valid = Sample {
+        temperature: 30,
+        relative_humidity: 55,
+    };
+    let script = [Attempt::Stalled, Attempt::Ok(valid)];
+    let mut calls = 0u32;
+
+    let result = read_with_retries(|| {
+        let attempt = script[calls as usize];
+        calls += 1;
+        attempt
+    });
+
+    assert_eq!(result, Some(valid));
+    assert_eq!(calls, 2);
+
+    let mut stall_calls = 0u32;
+    let exhausted = read_with_retries(|| {
+        stall_calls += 1;
+        Attempt::Stalled
+    });
+
+    assert_eq!(exhausted, None);
+    assert_eq!(stall_calls, u32::from(MAX_ATTEMPTS));
+}
+
+#[test]
+fn sensor_retries_out_of_range_ok() {
+    let bad = Sample {
+        temperature: 61,
+        relative_humidity: 50,
+    };
+    let good = Sample {
+        temperature: 22,
+        relative_humidity: 40,
+    };
+    let script = [Attempt::Ok(bad), Attempt::Ok(good)];
+    let mut calls = 0u32;
+
+    let result = read_with_retries(|| {
+        let attempt = script[calls as usize];
+        calls += 1;
+        attempt
+    });
+
+    assert_eq!(result, Some(good));
+    assert_eq!(calls, 2);
+}
+
+#[test]
+fn sensor_negative_temperature_round_trips() {
+    let valid = Sample {
+        temperature: -5,
+        relative_humidity: 40,
+    };
+
+    let result = read_with_retries(|| Attempt::Ok(valid));
+
+    assert_eq!(result, Some(valid));
+    assert_eq!(result.unwrap().temperature, -5);
 }

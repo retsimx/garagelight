@@ -8,6 +8,7 @@ pub mod net;
 pub mod radio;
 #[allow(dead_code)]
 pub mod secrets;
+pub mod sensors;
 pub mod update;
 
 /// Integer version identity, parsed at compile time from the repo-root `VERSION`

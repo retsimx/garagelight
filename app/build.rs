@@ -70,6 +70,31 @@ fn main() {
         );
     }
 
+    // 5. Version identity: the repo-root VERSION file holds the single integer
+    //    the firmware reports at runtime. Re-run when it changes, and fail
+    //    loudly if it is not a bare integer.
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let version_path = manifest_dir.join("../VERSION");
+    println!("cargo:rerun-if-changed={}", version_path.display());
+    let raw = fs::read_to_string(&version_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", version_path.display()));
+    let value = raw.trim();
+    let version: u32 = value.parse().unwrap_or_else(|_| {
+        panic!("VERSION must contain a single bare integer, found \"{value}\"")
+    });
+    println!("cargo:rustc-env=GARAGELIGHT_BUILD_VERSION={version}");
+
+    // 6. Secrets guard: `app/src/secrets.rs` is gitignored and materialised
+    //    from the committed example. Fail actionably instead of building an
+    //    image with no credentials.
+    let secrets_path = manifest_dir.join("src/secrets.rs");
+    if !secrets_path.exists() {
+        panic!(
+            "{} is missing; copy the template with: cp app/secrets.example.rs app/src/secrets.rs",
+            secrets_path.display()
+        );
+    }
+
     println!("cargo:rerun-if-changed=build.rs");
 }
 

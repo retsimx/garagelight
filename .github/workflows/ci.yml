@@ -76,6 +76,17 @@ jobs:
       - name: Release build (radio_smoke bench, thumbv6m)
         run: cargo build --release --target thumbv6m-none-eabi --features radio-smoke --bin radio_smoke
 
+      - name: Clippy (update selftest benches, thumbv6m)
+        # GL-3 test-only DFU harness and candidate image; the workspace steps
+        # deliberately skip these feature-gated bins.
+        run: cargo clippy --target thumbv6m-none-eabi --features update-selftest --bin update_selftest --bin update_image -- -D warnings
+
+      - name: Release build (update selftest benches, thumbv6m)
+        run: cargo build --release --target thumbv6m-none-eabi --features update-selftest --bin update_selftest --bin update_image
+
+      - name: Release build (broken candidate image, thumbv6m)
+        run: cargo build --release --target thumbv6m-none-eabi --features update-selftest,selftest-broken --bin update_image
+
       - name: Assert a single bt-hci version
         shell: bash
         run: |
@@ -98,6 +109,15 @@ jobs:
           SIZE=$(cargo size --release --target thumbv6m-none-eabi -p garagelight-app | awk '/garagelight-app$/ {print $1+$2}')
           echo "firmware size (text+data): $SIZE bytes (budget 798720)"
           test "$SIZE" -le 798720
+
+      - name: Size gate (bootloader, text + data <= 23.75 KiB)
+        shell: bash
+        run: |
+          # 24320 = 24 KiB (bootloader window) - 256 B boot2. The bootloader
+          # owns boot2 and must fit inside its dedicated 24 KiB partition.
+          SIZE=$(cargo size --release --target thumbv6m-none-eabi -p garagelight-bootloader | awk '/garagelight-bootloader$/ {print $1+$2}')
+          echo "bootloader size (text+data): $SIZE bytes (budget 24320)"
+          test "$SIZE" -le 24320
 
   contract:
     name: contract (cross-repo byte equality)

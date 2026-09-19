@@ -5,12 +5,14 @@
 The garage beam → lamp system: a beam breaks, the fact is published over BLE and
 telemetry, and the lamp reacts. This repository is the **Pico W firmware**, written in
 native Rust on `embassy-rp` for the RP2040. GL-1 stands up the buildable, flashable
-scaffold; GL-2 brings up the CYW43439 radio (WiFi + BLE coexistence). WiFi join, BLE
-GATT, DHT, MQTT and OTA behaviour arrive in later issues.
+scaffold; GL-2 brings up the CYW43439 radio (WiFi + BLE coexistence); GL-3 installs the
+`embassy-boot-rp` A/B bootloader and the pinned flash partition table. WiFi join, BLE GATT,
+DHT, MQTT and OTA behaviour arrive in later issues.
 
 - Epic: [retsimx/garagelight#1](https://github.com/retsimx/garagelight/issues/1)
 - Bootstrap (GL-1): [retsimx/garagelight#2](https://github.com/retsimx/garagelight/issues/2)
 - Radio bring-up (GL-2): [retsimx/garagelight#3](https://github.com/retsimx/garagelight/issues/3)
+- Flash layout / A/B boot (GL-3): [retsimx/garagelight#4](https://github.com/retsimx/garagelight/issues/4)
 
 The legacy MicroPython firmware (`main.py`, `boot.py`, `ble.py`, `secrets.py`, …) is the
 previous generation and is not the current build.
@@ -44,20 +46,51 @@ the binding constraint is actually higher — `bt-hci 0.10.1` declares
 ## Layout
 
 ```
-core/        pure host-testable policy: contract constants, value rules, budget math
-app/         firmware: no_std lib + two binaries (production + radio_smoke bench)
-bootloader/  placeholder; GL-3 replaces it with the real bootloader (GL-3)
+core/        pure host-testable policy: contract constants, value rules, budget math, layout
+app/         firmware: no_std lib + production, bench and update test binaries
+bootloader/  embassy-boot-rp A/B bootloader; owns boot2 and the pinned partition table
 ```
 
 - `core/` (`garagelight-core`) is `#![cfg_attr(not(test), no_std)]` and depends on no
-  hardware-facing crates, so its policy tests run on the host.
+  hardware-facing crates, so its policy tests run on the host. It also holds the
+  partition-layout constants (`core/src/layout.rs`).
 - `app/` (`garagelight-app`) is a `#![no_std]` library (`app/src/lib.rs`: `blobs`,
-  `logging`, `radio`, `secrets`) plus two binaries: the production `app/src/main.rs`
-  (`garagelight-app`) and the feature-gated bench binary `app/src/bin/radio_smoke.rs`
-  (`radio_smoke`, enabled by `--features radio-smoke`). Hardware dependencies are gated
-  under `[target.'cfg(target_arch = "arm")'.dependencies]`.
-- `bootloader/` (`garagelight-bootloader`) compiles and links, but its `memory.x` and entry
-  stub are explicitly a placeholder owned by GL-3.
+  `logging`, `radio`, `secrets`, `update`) plus four binaries: the production
+  `app/src/main.rs` (`garagelight-app`), the feature-gated bench binary
+  `app/src/bin/radio_smoke.rs` (`radio_smoke`, enabled by `--features radio-smoke`), and the
+  feature-gated update test binaries `app/src/bin/update_selftest.rs` (`update_selftest`) and
+  `app/src/bin/update_image.rs` (`update_image`, enabled by `--features update-selftest`).
+  Hardware dependencies are gated under
+  `[target.'cfg(target_arch = "arm")'.dependencies]`. It links
+  `link.x` only (never `link-rp.x`) and carries no boot2.
+- `bootloader/` (`garagelight-bootloader`) is the GL-3 `embassy-boot-rp` A/B bootloader. It
+  links the stock `link-rp.x`, owns boot2, and swaps a pending DFU image into ACTIVE before
+  booting ACTIVE. It is provisioned once over USB/SWD and is never updated OTA.
+
+## Flash layout / partition table (GL-3)
+
+The GL-3 bootloader owns the pinned 2 MiB partition table. Both `bootloader/memory.x` and
+`app/memory.x` carry the same table; `core/src/layout.rs` holds the constants with `const`
+assertions, and host tests parse both linker scripts to catch drift.
+
+| Region | Start | Size |
+|---|---|---|
+| BOOTLOADER | 0x10000000 | 24 KiB |
+| ACTIVE | 0x10006000 | 780 KiB |
+| DFU | 0x100C9000 | 784 KiB |
+| STATE | 0x1018D000 | 4 KiB |
+| spare | 0x1018E000 | ~456 KiB |
+
+- **BOOTLOADER** — boot2 plus the 24 KiB bootloader window; USB/SWD-only to change.
+- **ACTIVE** — the running application image (`garagelight-app`), linked here at 780 KiB.
+- **DFU** — the staging slot, one erase page larger than ACTIVE (`DFU = ACTIVE + 1 page`).
+- **STATE** — boot state and the swap-progress log. `embassy-boot` requires
+  `2 + 4 × (ACTIVE pages)` write-size units (782 for 195 ACTIVE pages), well inside 4 KiB.
+- **spare** — unused flash between STATE and the end of the 2 MiB part.
+
+The `__bootloader_*` linker symbols are **flash-relative** (`ORIGIN(ACTIVE) - ORIGIN(BOOT2)`),
+matching `embassy_rp::Flash` offsets from `FLASH_BASE = 0x1000_0000`; using the absolute
+addresses from the table above would produce out-of-range partitions.
 
 ## Build
 
@@ -78,14 +111,15 @@ Current measured size (all four blobs included):
 
 ```
    text    data     bss     dec     hex filename
- 359896      68   32200  392164   5fbe4 garagelight-app
+ 360108      68   32208  392384   5fcc0 garagelight-app
 ```
 
-**text 359,896 + data 68 = 359,964 B** against a budget of **798,720 B = 780 KiB**.
+**text 360,108 + data 68 = 360,176 B** against a budget of **798,720 B = 780 KiB**.
 
 ## Test
 
-The host policy suite (contract ↔ `contract.toml`, byte-value rules, budget invariants):
+The host policy suite (contract ↔ `contract.toml`, byte-value rules, budget invariants, and
+partition-layout ↔ `memory.x` drift):
 
 ```sh
 cargo test -p garagelight-core --target x86_64-unknown-linux-gnu
@@ -98,7 +132,25 @@ to compile for the bare-metal target and fail.
 Firmware and radio behaviour have no host test; they are covered by the thumbv6m build and
 the bench runbook below.
 
-## Flash (SWD, development)
+## Provision and flash (USB / SWD)
+
+The GL-3 `embassy-boot-rp` bootloader replaces the temporary GL-1/GL-2 boot2 shim: it owns
+boot2 and is what runs from the reset vector, so the shim is no longer needed once the
+bootloader is provisioned. Flash the bootloader at `0x10000000`, then the ACTIVE application
+at `0x10006000`; every later reset boots through the bootloader:
+
+```sh
+cargo build --release --target thumbv6m-none-eabi
+probe-rs download --chip RP2040 target/thumbv6m-none-eabi/release/garagelight-bootloader
+probe-rs download --chip RP2040 target/thumbv6m-none-eabi/release/garagelight-app
+probe-rs reset --chip RP2040
+```
+
+Once the bootloader is provisioned, `probe-rs run` works for day-to-day app flashing when the
+probe's reset line is wired: it downloads the app and resets the chip, the reset vector runs
+the bootloader, and the bootloader loads ACTIVE. On a probe without the reset line wired, run
+`probe-rs reset` and then a fresh `probe-rs attach` to stream RTT. Reflashing the app erases
+only the sectors from `0x10006000` up, so the bootloader survives.
 
 ```sh
 probe-rs run --chip RP2040 target/thumbv6m-none-eabi/release/garagelight-app
@@ -112,28 +164,46 @@ cargo run --release -p garagelight-app
 ```
 
 The app logs over **UART0 (GP0 TX) at 115200** and defmt/RTT: version, reset reason and
-the four blob sizes.
+the four blob sizes. The `radio_smoke` bench binary runs the same way.
 
-`garagelight-app` links at `0x10006000` as an ACTIVE-partition image with **no boot2** (the
-GL-3 bootloader owns boot2), so it cannot cold-boot from flash. `probe-rs run` only downloads
-the image and then **resets** the chip, so execution starts from the reset vector — and
-`0x10000000` is empty, so nothing runs. Until GL-3 provides a boot2, flash the patched stock
-boot2 shim once (see the bench runbook below); reflashing the app erases only the sectors from
-`0x10006000` up, so the shim at `0x10000000` survives. The `radio_smoke` bench binary runs the
-same way.
+### A/B update lifecycle
 
-## Recovery / first provisioning (BOOTSEL / UF2)
+`app/src/update.rs` wraps `embassy_boot::FirmwareUpdater` with an app-side flash adapter that
+feeds the shared 8 s watchdog on every erase, write and read (`main.rs` arms that same
+watchdog as its first action). The lifecycle:
 
-There is no self-contained reset-to-bootloader path in GL-1. To recover a bricked board:
+1. `prepare_update()` / `write_firmware()` stream the new image into **DFU**.
+2. `mark_updated()` schedules the swap; on the **next reset** the bootloader copies DFU into
+   ACTIVE and runs the new image.
+3. The first boot of that image must call `mark_booted()` to confirm it. If it never does,
+   the bootloader reverts to the previous image on the **next reset**.
+4. `mark_dfu()` requests DFU mode on the next reset instead of booting: the bootloader resets
+   into the ROM USB bootloader (BOOTSEL) (see Recovery).
+
+Do **not** add application-side `pause_core1`/`resume_core1`: the `embassy-rp` flash driver
+already parks both cores around each flash operation, and the app must not enable
+`run-from-ram`.
+
+## Recovery (BOOTSEL / UF2 and DFU)
+
+**BOOTSEL / UF2 mass-storage recovery.** The RP2040 ROM bootloader is always available, even
+when the flash contents are unusable:
 
 1. Hold **BOOTSEL** while plugging in USB.
 2. A mass-storage device named **`RPI-RP2`** appears.
 3. Copy a `.uf2` image onto it; the board reboots.
 
-Note that GL-1's `garagelight-app` is an **ACTIVE-partition image** linked at
-`0x10006000` (780 KiB). The real bootloader, partition table and UF2 flow arrive with
-**GL-3**; until then the app is run over SWD (above) after flashing the boot2 shim once —
-`probe-rs run` resets the chip and does not jump to the ELF entry point by itself.
+Because the bootloader owns boot2 and lives at `0x10000000`, BOOTSEL recovers a board whose
+ACTIVE image is bad.
+
+**USB DFU escape hatch.** When OTA is unavailable but the application still runs, it can ask
+the bootloader for USB DFU on the next reset via `app/src/update.rs`:
+
+- `Updater::mark_dfu()` — request DFU mode on the next reset; the bootloader resets into the
+  ROM USB bootloader (BOOTSEL, mounting as `RPI-RP2`) instead of booting ACTIVE.
+
+This is deliberately kept: a device mounted out of easy reach needs a USB escape hatch that
+does not depend on the OTA stack.
 
 ## CYW43 firmware blobs
 
@@ -243,23 +313,18 @@ confirms the device is visible).
 
 **Build and run**
 
-The ACTIVE app links at `0x10006000` with **no boot2** (the GL-3 bootloader owns boot2), so it
-cannot cold-boot from flash. `probe-rs run` downloads the image but then **resets** the chip,
-so execution starts from the reset vector where `0x10000000` is empty. Flash the boot2 shim
-once first, then run:
+Provision the GL-3 bootloader once with the *Provision and flash* commands above, then run
+the bench binary — a normal reset boots ACTIVE through the bootloader. If the probe's reset
+line is not wired, use `probe-rs reset` then a fresh `probe-rs attach` to stream RTT:
 
 ```sh
-python3 scripts/boot2_shim.py --output /tmp/boot2_shim.bin
-probe-rs download --chip RP2040 --binary-format bin --base-address 0x10000000 /tmp/boot2_shim.bin
 cargo build --release --target thumbv6m-none-eabi --features radio-smoke --bin radio_smoke
 probe-rs run --chip RP2040 target/thumbv6m-none-eabi/release/radio_smoke
 ```
 
-`scripts/boot2_shim.py` patches the stock `boot2_w25q080.padded.bin` (from the `rp2040-boot2`
-crate already in the dependency graph) to jump to the app at `0x10006000`. Reflashing the app
-erases only the sectors from `0x10006000` up, so the shim at `0x10000000` survives across runs
-and only needs flashing once. This shim is a bring-up workaround for GL-1/GL-2 and is replaced
-by the real bootloader in GL-3 — hence the reset behaviour above.
+The GL-1/GL-2 `scripts/boot2_shim.py` workaround is superseded by the real bootloader and is
+no longer used. If the bench board is blank, flash the bootloader and the ACTIVE app first as
+in *Provision and flash*.
 
 (`cargo run --release -p garagelight-app --features radio-smoke --bin radio_smoke` is the
 shorthand — the `.cargo/config.toml` runner already passes `--chip RP2040`.)

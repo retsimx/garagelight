@@ -47,5 +47,7 @@ overflow-checks = false
 
 [profile.dev]
 debug = 2
-opt-level = 1
+# Size-optimised: the app debug image links against a 780 KiB FLASH region, and
+# at `opt-level = 1` the OTA/TLS code overflowed it. `debug` info is retained.
+opt-level = "s"
 overflow-checks = true

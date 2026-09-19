@@ -7,6 +7,7 @@ pub mod highpri;
 pub mod lamp;
 pub mod logging;
 pub mod net;
+pub mod ota;
 pub mod radio;
 #[allow(dead_code)]
 pub mod secrets;

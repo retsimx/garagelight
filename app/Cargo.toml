@@ -42,7 +42,7 @@ embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driv
 embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-sync = { workspace = true, features = ["defmt"] }
-embassy-net = { workspace = true, features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet"] }
+embassy-net = { workspace = true, features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet", "dns"] }
 cyw43 = { workspace = true, features = ["defmt", "bluetooth", "firmware-logs"] }
 cyw43-pio = { workspace = true, features = ["defmt"] }
 bt-hci = { workspace = true }
@@ -58,6 +58,14 @@ portable-atomic = { version = "1.5", features = ["critical-section"] }
 sha2 = { workspace = true }
 minimq = { workspace = true }
 dht-sensor = { workspace = true }
+# GL-10 OTA transport: TLS 1.3 over embassy-net. The entropy source is
+# embassy-rp's `clocks::RoscRng` (the RP2040 ROSC random bit), so no direct
+# `rand_core` dependency is needed.
+# No `defmt`: the handshake error is logged as a bare line, and dropping the
+# feature keeps the embedded-tls `defmt::Format` impls out of the image (the
+# debug-profile FLASH budget is tight).
+embedded-tls = { version = "0.19", default-features = false }
+embedded-io-async = "0.7"
 defmt = { workspace = true }
 defmt-rtt = { workspace = true }
 panic-probe = { workspace = true }

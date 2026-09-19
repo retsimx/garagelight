@@ -465,6 +465,22 @@ fault indication.
 - **Polarity unverified** — `LAMP_ON_LEVEL` (`true`, active-high) is a single constant; no
   lamp is attached to the prototype, so the wiring polarity is confirmed at cutover.
 
+#### Lamp receive→apply latency (GB-6 segment d)
+
+The optional `lamp-latency` cargo feature instruments the BLE-fact handoff so the
+peripheral-side receive→apply time can be measured:
+
+- **Change-only** — the lamp task emits `lamp_delta_us=<microseconds>` on RTT (`defmt`) only
+  when a `Fact` event is applied, and only after the pin has been driven, so the log can
+  never perturb the measured apply. Steady-state ticks and link events never log.
+- **RTT only** — the high-priority task never blocks on UART; the delta is emitted with
+  `defmt::info!` and consumed via the RTT probe.
+- **Off by default** — without the feature the timestamp is a constant `0` and the log is
+  compiled out, so the production image and its behaviour are unchanged.
+
+Build the instrumented image with
+`cargo build --release --target thumbv6m-none-eabi -p garagelight-app --features lamp-latency`.
+
 ### WiFi station and DNS (GL-7, GL-10)
 
 GL-7 adds the station join and reconnect supervisor. It built `embassy-net` **without the

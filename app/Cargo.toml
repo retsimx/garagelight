@@ -8,6 +8,7 @@ radio-smoke = []
 update-selftest = []
 selftest-broken = ["update-selftest"]
 selftest-fail-ble = []
+lamp-latency = []
 
 [[bin]]
 name = "garagelight-app"

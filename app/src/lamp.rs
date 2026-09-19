@@ -21,8 +21,39 @@ use garagelight_core::lamp::{LampMachine, LAMP_ON_LEVEL};
 
 use crate::logln;
 
+/// A control event plus the microsecond instant it was posted (0 when the
+/// lamp-latency feature is off).
+#[derive(Clone, Copy)]
+pub struct StampedEvent {
+    pub event: LampEvent,
+    pub at_us: u64,
+}
+
 /// Ordered control events. Single consumer: the high-priority lamp task.
-pub static EVENTS: Channel<CriticalSectionRawMutex, LampEvent, 8> = Channel::new();
+static EVENTS: Channel<CriticalSectionRawMutex, StampedEvent, 8> = Channel::new();
+
+/// Post a non-fact control event (link loss, tick).
+pub fn post(event: LampEvent) {
+    let _ = EVENTS.try_send(StampedEvent { event, at_us: 0 });
+}
+
+/// Post a validated beam fact, stamped when the lamp-latency feature is on.
+#[cfg(feature = "lamp-latency")]
+pub fn post_fact(fact: garagelight_core::contract::BeamFact) {
+    let _ = EVENTS.try_send(StampedEvent {
+        event: LampEvent::Fact(fact),
+        at_us: Instant::now().as_micros(),
+    });
+}
+
+/// Post a validated beam fact (unstamped when the lamp-latency feature is off).
+#[cfg(not(feature = "lamp-latency"))]
+pub fn post_fact(fact: garagelight_core::contract::BeamFact) {
+    let _ = EVENTS.try_send(StampedEvent {
+        event: LampEvent::Fact(fact),
+        at_us: 0,
+    });
+}
 
 /// Latched "the owner task has driven the pin at least once" (GL-11).
 static READY: AtomicBool = AtomicBool::new(false);
@@ -80,10 +111,15 @@ async fn lamp_task(pin: Peri<'static, PIN_28>) {
     lamp.drive(Instant::now().as_millis());
     READY.store(true, Ordering::Relaxed);
     loop {
-        let event = EVENTS.receive().await;
+        let msg = EVENTS.receive().await;
         let now = Instant::now().as_millis();
-        lamp.machine.apply(event, now);
+        lamp.machine.apply(msg.event, now);
         lamp.drive(now);
+        #[cfg(feature = "lamp-latency")]
+        if let LampEvent::Fact(_) = msg.event {
+            let applied_us = Instant::now().as_micros();
+            defmt::info!("lamp_delta_us={}", applied_us.saturating_sub(msg.at_us));
+        }
     }
 }
 
@@ -92,7 +128,7 @@ async fn lamp_task(pin: Peri<'static, PIN_28>) {
 async fn fault_timer() {
     loop {
         Timer::after(Duration::from_millis(20)).await;
-        let _ = EVENTS.sender().try_send(LampEvent::Tick);
+        post(LampEvent::Tick);
     }
 }
 

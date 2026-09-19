@@ -132,6 +132,14 @@ jobs:
       - name: Release build (selftest-fail-ble app, thumbv6m)
         run: cargo build --release --target thumbv6m-none-eabi --features selftest-fail-ble --bin garagelight-app
 
+      - name: Clippy (lamp-latency app, thumbv6m)
+        # GB-6 segment (d) peripheral receive→apply instrumentation; kept here so
+        # the feature-gated code path cannot rot while production stays off.
+        run: cargo clippy -p garagelight-app --target thumbv6m-none-eabi --features lamp-latency -- -D warnings
+
+      - name: Release build (lamp-latency app, thumbv6m)
+        run: cargo build --release --target thumbv6m-none-eabi -p garagelight-app --features lamp-latency
+
       - name: Assert a single bt-hci version
         shell: bash
         run: |

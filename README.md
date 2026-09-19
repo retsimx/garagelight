@@ -6,8 +6,8 @@ The garage beam → lamp system: a beam breaks, the fact is published over BLE a
 telemetry, and the lamp reacts. This repository is the **Pico W firmware**, written in
 native Rust on `embassy-rp` for the RP2040. GL-1 stands up the buildable, flashable
 scaffold; GL-2 brings up the CYW43439 radio (WiFi + BLE coexistence); GL-3 installs the
-`embassy-boot-rp` A/B bootloader and the pinned flash partition table. WiFi join, BLE GATT,
-DHT, MQTT and OTA behaviour arrive in later issues.
+`embassy-boot-rp` A/B bootloader and the pinned flash partition table. WiFi join, DHT,
+MQTT and OTA behaviour arrive in later issues.
 
 - Epic: [retsimx/garagelight#1](https://github.com/retsimx/garagelight/issues/1)
 - Bootstrap (GL-1): [retsimx/garagelight#2](https://github.com/retsimx/garagelight/issues/2)
@@ -260,11 +260,32 @@ the WiFi net driver, the `cyw43` control handle and the BLE controller:
   GPIO.
 - **BLE** — the Bluetooth driver is wrapped in
   `trouble_host::prelude::ExternalController` (the `BleController` type in
-  `app/src/radio.rs`).
+  `app/src/radio.rs`); GL-5 builds the peripheral and GATT server on top of it (below).
 
-Production `main.rs` initialises the radio, builds an `embassy_net::Stack` over the net
-driver, spawns the net runner and toggles the LED once. It does **not** join an AP or
-advertise; those are GL-7 and GL-5.
+Production `main.rs` initialises the radio, starts the BLE peripheral and GATT server via
+`ble::spawn` (app/src/main.rs:74), **then** builds an `embassy_net::Stack` over the net
+driver (app/src/main.rs:78), spawns the net runner and toggles the LED once. It still does
+**not** join an AP or publish telemetry; that is GL-7.
+
+### BLE peripheral / GATT (GL-5)
+
+GL-5 brings up the trouble-host BLE peripheral and GATT server. `main.rs` calls `ble::spawn`
+immediately after `radio::init` and before the WiFi/net stack, so the control path is
+independent of WiFi.
+
+- **GATT contract** — `app/src/gatt.rs` defines the beam service from the shared contract:
+  service `6a4c0001-b5a3-4f1e-9c2d-7e8f9a0b1c2d`, characteristic
+  `6a4c0002-b5a3-4f1e-9c2d-7e8f9a0b1c2d` (`read` + `write_without_response`, 1 byte:
+  `0x00` intact / `0x01` broken, initial `0x00`). The UUIDs and value rules come from
+  `contract.toml` via `core/src/contract.rs`.
+- **Advertising** — `app/src/ble.rs` advertises as `glgt` (connectable scannable
+  undirected), interval 30 ms, with the 128-bit service UUID in the advertising data and
+  appearance `GENERIC_POWER_DEVICE`. After a disconnect it re-advertises automatically.
+- **Write handling** — a valid write is signalled to the control path through
+  `ble::BEAM_FACT` (`ble::wait_fact()`, consumed by GL-6). Invalid length/value writes and
+  ATT Write Requests are ignored and logged.
+- **Not done** — the peripheral never initiates a connection-parameter update, and there is
+  no pairing, encryption or bonding.
 
 ### Dependency note — one embassy source
 
@@ -276,6 +297,10 @@ to type-check with `E0277` ("multiple different versions of crate `embassy_net_d
 Patching only the driver crate unifies both halves on one driver trait, which is the
 smallest change that compiles. Patching `embassy-net` too would needlessly swap the whole
 network backend to the git rev's `xarxa` stack.
+
+The BLE stack versions are pinned by `Cargo.lock`: **`trouble-host 0.8.0`**,
+**`bt-hci 0.10.1`** and **`btuuid 0.1.1`**, resolved from the workspace
+`trouble-host = "0.8"` / `bt-hci = "0.10"` requirements in `Cargo.toml`.
 
 ## Bench / hardware verification runbook (GL-2)
 

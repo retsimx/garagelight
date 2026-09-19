@@ -38,7 +38,9 @@ pub fn spawn(
     control: Control<'static>,
     net_device: NetDriver<'static>,
 ) -> Stack<'static> {
-    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    // Four concurrent sockets: embassy-net's permanent DNS socket, the DHCP
+    // lease, GL-8's long-lived telemetry TCP, and GL-10's OTA TCP during a check.
+    static RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         net_device,
         Config::dhcpv4(Default::default()),

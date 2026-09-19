@@ -2,6 +2,7 @@ use core::net::Ipv4Addr;
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use sha2::Digest;
 
 use crate::budget::{fits, ACTIVE_FLASH_BYTES, BLOB_TOTAL_BYTES, VERSION};
 use crate::contract::{
@@ -17,6 +18,11 @@ use crate::lamp::{
 use crate::layout::{
     ACTIVE_BASE, ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BYTES,
     FLASH_END, PAGE_BYTES, SPARE_BASE, SPARE_BYTES, STATE_BASE, STATE_BYTES, WRITE_BYTES,
+};
+use crate::ota::{
+    apply_update, base64, basic_authorization, decide, parse_sha256_hex, parse_url, parse_version,
+    BodyReader, Decision, Flasher, HeadError, HeadEvent, HeadParser, ResponseHead, UpdateError,
+    UrlError, CHUNK_BYTES,
 };
 use crate::sensor::{
     in_range, read_with_retries, Attempt, Sample, MAX_ATTEMPTS, READ_STALL_US, RETRY_SETTLE_MS,
@@ -673,4 +679,479 @@ fn telemetry_max_sample_payload_holds_widest_sample() {
     let len = encode_sample(widest, &mut out).expect("widest sample fits in MAX_SAMPLE_PAYLOAD");
     assert_eq!(&out[..len], b"{\"temp\": -128, \"humidity\": 255}");
     assert!(len <= MAX_SAMPLE_PAYLOAD);
+}
+#[test]
+fn ota_decision_table() {
+    assert_eq!(CHUNK_BYTES, 4096);
+    assert_eq!(decide(5, 4), Decision::Update);
+    assert_eq!(decide(5, 5), Decision::Skip);
+    assert_eq!(decide(5, 6), Decision::Update);
+    assert_eq!(decide(0, 0), Decision::Skip);
+}
+
+const OK_HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nX-Trace: abc\r\n\r\n";
+
+#[test]
+fn head_parser_completes_one_byte_at_a_time() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in OK_HEAD {
+        event = parser.push(byte);
+    }
+    assert_eq!(
+        event,
+        HeadEvent::Complete(ResponseHead {
+            status: 200,
+            content_length: Some(4096),
+        })
+    );
+    assert_eq!(parser.consumed(), OK_HEAD.len());
+}
+
+#[test]
+fn head_parser_completes_split_at_every_boundary() {
+    for split in 0..=OK_HEAD.len() {
+        let mut parser = HeadParser::new();
+        let mut event = HeadEvent::NeedMore;
+        for &byte in &OK_HEAD[..split] {
+            event = parser.push(byte);
+        }
+        if split < OK_HEAD.len() {
+            assert_eq!(
+                event,
+                HeadEvent::NeedMore,
+                "premature event at split {split}"
+            );
+        }
+        for &byte in &OK_HEAD[split..] {
+            event = parser.push(byte);
+        }
+        assert_eq!(
+            event,
+            HeadEvent::Complete(ResponseHead {
+                status: 200,
+                content_length: Some(4096),
+            }),
+            "split at {split}"
+        );
+    }
+}
+
+#[test]
+fn head_parser_accepts_404_as_a_head() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.1 404 Not Found\r\n\r\n" {
+        event = parser.push(byte);
+    }
+    assert_eq!(
+        event,
+        HeadEvent::Complete(ResponseHead {
+            status: 404,
+            content_length: None,
+        })
+    );
+
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n" {
+        event = parser.push(byte);
+    }
+    assert_eq!(
+        event,
+        HeadEvent::Complete(ResponseHead {
+            status: 404,
+            content_length: Some(0),
+        })
+    );
+}
+
+#[test]
+fn head_parser_is_case_insensitive_on_header_names() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.1 200 OK\r\ncOnTeNt-LeNgTh: 17\r\n\r\n" {
+        event = parser.push(byte);
+    }
+    assert_eq!(
+        event,
+        HeadEvent::Complete(ResponseHead {
+            status: 200,
+            content_length: Some(17),
+        })
+    );
+}
+
+#[test]
+fn head_parser_rejects_transfer_encoding() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 10\r\n\r\n" {
+        event = parser.push(byte);
+    }
+    assert_eq!(event, HeadEvent::Reject(HeadError::TransferEncoding));
+}
+
+#[test]
+fn head_parser_rejects_missing_content_length() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.1 200 OK\r\nX-Trace: abc\r\n\r\n" {
+        event = parser.push(byte);
+    }
+    assert_eq!(event, HeadEvent::Reject(HeadError::MissingContentLength));
+}
+
+#[test]
+fn head_parser_rejects_duplicate_content_length() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n" {
+        event = parser.push(byte);
+    }
+    assert_eq!(event, HeadEvent::Reject(HeadError::DuplicateContentLength));
+}
+
+#[test]
+fn head_parser_rejects_malformed_and_unexpected_status() {
+    let cases: &[(&[u8], HeadError)] = &[
+        (b"HTTX/1.1 200 OK\r\n\r\n", HeadError::MalformedStatusLine),
+        (b"HTTP/1.1 \r\n\r\n", HeadError::TooFewStatusTokens),
+        (b"HTTP/1.1 200\r\n\r\n", HeadError::TooFewStatusTokens),
+        (b"HTTP/1.1 abc OK\r\n\r\n", HeadError::NonNumericStatus),
+        (
+            b"HTTP/1.1 500 Boom\r\nContent-Length: 0\r\n\r\n",
+            HeadError::UnexpectedStatus,
+        ),
+    ];
+    for (raw, expected) in cases {
+        let mut parser = HeadParser::new();
+        let mut event = HeadEvent::NeedMore;
+        for &byte in *raw {
+            event = parser.push(byte);
+        }
+        assert_eq!(event, HeadEvent::Reject(*expected), "{raw:?}");
+    }
+}
+
+#[test]
+fn head_parser_rejects_malformed_header_line() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.1 200 OK\r\nno-colon-here\r\n\r\n" {
+        event = parser.push(byte);
+    }
+    assert_eq!(event, HeadEvent::Reject(HeadError::MalformedHeader));
+}
+
+#[test]
+fn head_parser_rejects_oversized_header_block() {
+    let mut parser = HeadParser::new();
+    let mut event = HeadEvent::NeedMore;
+    for &byte in b"HTTP/1.1 200 OK\r\nX-Pad: " {
+        event = parser.push(byte);
+    }
+    for _ in 0..3000 {
+        event = parser.push(b'a');
+    }
+    assert_eq!(event, HeadEvent::Reject(HeadError::OversizedHeader));
+}
+
+#[test]
+fn parse_url_shapes() {
+    let uri = parse_url("https://host", "proj").unwrap();
+    assert!(uri.tls);
+    assert_eq!(uri.host, "host");
+    assert_eq!(uri.port, 443);
+    assert_eq!(uri.path(), "/proj");
+
+    let uri = parse_url("https://host:8443/prefix", "proj").unwrap();
+    assert!(uri.tls);
+    assert_eq!(uri.host, "host");
+    assert_eq!(uri.port, 8443);
+    assert_eq!(uri.path(), "/prefix/proj");
+
+    let uri = parse_url("http://host/", "proj").unwrap();
+    assert!(!uri.tls);
+    assert_eq!(uri.port, 80);
+    assert_eq!(uri.path(), "/proj");
+
+    let uri = parse_url("http://192.168.0.10:8080/a/b/", "proj").unwrap();
+    assert!(!uri.tls);
+    assert_eq!(uri.host, "192.168.0.10");
+    assert_eq!(uri.port, 8080);
+    assert_eq!(uri.path(), "/a/b/proj");
+}
+
+#[test]
+fn parse_url_rejects_bad_input() {
+    assert_eq!(parse_url("host", "p").unwrap_err(), UrlError::Scheme);
+    assert_eq!(parse_url("ftp://host", "p").unwrap_err(), UrlError::Scheme);
+    assert_eq!(parse_url("https://", "p").unwrap_err(), UrlError::Host);
+    assert_eq!(
+        parse_url("https://host:0", "p").unwrap_err(),
+        UrlError::Port
+    );
+    assert_eq!(
+        parse_url("https://host:abc", "p").unwrap_err(),
+        UrlError::Port
+    );
+    assert_eq!(
+        parse_url("https://host", "").unwrap_err(),
+        UrlError::Project
+    );
+    assert_eq!(
+        parse_url("https://host", "a/b").unwrap_err(),
+        UrlError::Project
+    );
+}
+
+#[test]
+fn parse_version_accepts_trimmed_digits() {
+    assert_eq!(parse_version(b"7"), Some(7));
+    assert_eq!(parse_version(b"  42\n"), Some(42));
+    assert_eq!(parse_version(b"0"), Some(0));
+    assert_eq!(parse_version(b"4294967295"), Some(u32::MAX));
+    assert_eq!(parse_version(b"4294967296"), None);
+    assert_eq!(parse_version(b""), None);
+    assert_eq!(parse_version(b" \n"), None);
+    assert_eq!(parse_version(b"1a"), None);
+    assert_eq!(parse_version(b"1 2"), None);
+}
+
+#[test]
+fn parse_sha256_hex_shapes() {
+    let hex = b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let parsed = parse_sha256_hex(hex).expect("valid lowercase hex");
+    assert_eq!(parsed[0], 0xe3);
+    assert_eq!(parsed[31], 0x55);
+
+    let mut with_newline = hex.to_vec();
+    with_newline.push(b'\n');
+    assert_eq!(parse_sha256_hex(&with_newline), Some(parsed));
+    assert_eq!(
+        parse_sha256_hex(b"  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  "),
+        Some(parsed)
+    );
+
+    let upper = b"E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
+    assert_eq!(parse_sha256_hex(upper), None);
+    assert_eq!(parse_sha256_hex(&hex[..63]), None);
+    let mut non_hex = hex.to_vec();
+    non_hex[63] = b'g';
+    assert_eq!(parse_sha256_hex(&non_hex), None);
+    assert_eq!(parse_sha256_hex(b""), None);
+}
+
+fn b64_str<'a>(input: &[u8], out: &'a mut [u8]) -> Option<&'a str> {
+    let n = base64(input, out)?;
+    core::str::from_utf8(&out[..n]).ok()
+}
+
+#[test]
+fn base64_matches_rfc4648_vectors() {
+    let mut out = [0u8; 16];
+    assert_eq!(b64_str(b"", &mut out), Some(""));
+    assert_eq!(b64_str(b"f", &mut out), Some("Zg=="));
+    assert_eq!(b64_str(b"fo", &mut out), Some("Zm8="));
+    assert_eq!(b64_str(b"foo", &mut out), Some("Zm9v"));
+    assert_eq!(b64_str(b"foob", &mut out), Some("Zm9vYg=="));
+    assert_eq!(b64_str(b"fooba", &mut out), Some("Zm9vYmE="));
+    assert_eq!(b64_str(b"foobar", &mut out), Some("Zm9vYmFy"));
+}
+
+#[test]
+fn base64_reports_small_buffer() {
+    let mut out = [0u8; 3];
+    assert_eq!(base64(b"foo", &mut out), None);
+    let mut out = [0u8; 4];
+    assert_eq!(base64(b"foo", &mut out), Some(4));
+}
+
+#[test]
+fn basic_authorization_encodes_user_colon_pass() {
+    let mut out = [0u8; 64];
+    let n = basic_authorization("user", "pass", &mut out).unwrap();
+    assert_eq!(&out[..n], b"Basic dXNlcjpwYXNz");
+
+    let n = basic_authorization("Aladdin", "open sesame", &mut out).unwrap();
+    assert_eq!(&out[..n], b"Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+}
+
+#[test]
+fn basic_authorization_omits_empty_or_small_buffer() {
+    let mut out = [0u8; 64];
+    assert_eq!(basic_authorization("", "", &mut out), None);
+    let mut out = [0u8; 8];
+    assert_eq!(basic_authorization("user", "pass", &mut out), None);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlashOp {
+    Write { offset: usize, len: usize },
+    MarkUpdated,
+}
+
+#[derive(Default)]
+struct MockFlasher {
+    ops: Vec<FlashOp>,
+}
+
+impl MockFlasher {
+    fn writes(&self) -> Vec<(usize, usize)> {
+        self.ops
+            .iter()
+            .filter_map(|op| match op {
+                FlashOp::Write { offset, len } => Some((*offset, *len)),
+                FlashOp::MarkUpdated => None,
+            })
+            .collect()
+    }
+
+    fn marks(&self) -> usize {
+        self.ops
+            .iter()
+            .filter(|op| matches!(op, FlashOp::MarkUpdated))
+            .count()
+    }
+}
+
+impl Flasher for MockFlasher {
+    type Error = ();
+
+    async fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), ()> {
+        self.ops.push(FlashOp::Write {
+            offset,
+            len: data.len(),
+        });
+        Ok(())
+    }
+
+    async fn mark_updated(&mut self) -> Result<(), ()> {
+        self.ops.push(FlashOp::MarkUpdated);
+        Ok(())
+    }
+}
+
+struct SliceReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SliceReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+}
+
+impl BodyReader for SliceReader<'_> {
+    type Error = ();
+
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
+        let remaining = self.data.len() - self.pos;
+        let n = remaining.min(buf.len());
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+const HELLO: &[u8] = b"hello world";
+const HELLO_SHA256: &[u8] = b"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
+#[test]
+fn apply_update_rejects_oversize_before_any_flash_op() {
+    let mut flasher = MockFlasher::default();
+    let mut body = SliceReader::new(b"");
+    let length = u64::from(ACTIVE_BYTES) + 1;
+    let expected = parse_sha256_hex(HELLO_SHA256).unwrap();
+    let result = pollster::block_on(apply_update(&mut flasher, &mut body, length, &expected));
+    assert_eq!(
+        result,
+        Err(UpdateError::Oversize {
+            length,
+            capacity: ACTIVE_BYTES,
+        })
+    );
+    assert!(flasher.ops.is_empty(), "size check must precede flashing");
+    assert_eq!(flasher.writes(), Vec::<(usize, usize)>::new());
+    assert_eq!(flasher.marks(), 0);
+    assert_eq!(body.pos, 0, "the body must not be read on oversize");
+}
+
+#[test]
+fn apply_update_happy_path_marks_exactly_once() {
+    let expected = parse_sha256_hex(HELLO_SHA256).unwrap();
+    let mut flasher = MockFlasher::default();
+    let mut body = SliceReader::new(HELLO);
+    let result = pollster::block_on(apply_update(
+        &mut flasher,
+        &mut body,
+        HELLO.len() as u64,
+        &expected,
+    ));
+    assert_eq!(result, Ok(()));
+    assert_eq!(flasher.writes(), vec![(0, HELLO.len())]);
+    assert_eq!(flasher.marks(), 1);
+    assert_eq!(flasher.ops.last(), Some(&FlashOp::MarkUpdated));
+}
+
+#[test]
+fn apply_update_hash_mismatch_does_not_mark() {
+    let expected = parse_sha256_hex(HELLO_SHA256).unwrap();
+    let flipped = b"hello worle";
+    let mut flasher = MockFlasher::default();
+    let mut body = SliceReader::new(flipped);
+    let result = pollster::block_on(apply_update(
+        &mut flasher,
+        &mut body,
+        flipped.len() as u64,
+        &expected,
+    ));
+    assert_eq!(result, Err(UpdateError::HashMismatch));
+    assert_eq!(flasher.marks(), 0);
+}
+
+#[test]
+fn apply_update_truncated_body_is_too_short_and_does_not_mark() {
+    let expected = parse_sha256_hex(HELLO_SHA256).unwrap();
+    let mut flasher = MockFlasher::default();
+    let mut body = SliceReader::new(b"hello");
+    let result = pollster::block_on(apply_update(&mut flasher, &mut body, 11, &expected));
+    assert_eq!(result, Err(UpdateError::TooShort));
+    assert_eq!(flasher.marks(), 0);
+}
+
+#[test]
+fn apply_update_overlong_body_is_too_long_and_does_not_mark() {
+    let expected = parse_sha256_hex(HELLO_SHA256).unwrap();
+    let mut flasher = MockFlasher::default();
+    let mut body = SliceReader::new(HELLO);
+    let result = pollster::block_on(apply_update(&mut flasher, &mut body, 4, &expected));
+    assert_eq!(result, Err(UpdateError::TooLong));
+    assert_eq!(flasher.marks(), 0);
+}
+
+#[test]
+fn apply_update_streams_multiple_chunks_in_order() {
+    let len = 2 * CHUNK_BYTES + 100;
+    let data = vec![0x5au8; len];
+    let digest = sha2::Sha256::digest(&data);
+    let mut expected = [0u8; 32];
+    expected.copy_from_slice(&digest);
+
+    let mut flasher = MockFlasher::default();
+    let mut body = SliceReader::new(&data);
+    let result = pollster::block_on(apply_update(&mut flasher, &mut body, len as u64, &expected));
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        flasher.writes(),
+        vec![
+            (0, CHUNK_BYTES),
+            (CHUNK_BYTES, CHUNK_BYTES),
+            (2 * CHUNK_BYTES, 100),
+        ]
+    );
+    assert!(flasher.writes().iter().all(|(_, n)| *n <= CHUNK_BYTES));
+    assert_eq!(flasher.marks(), 1);
 }

@@ -189,6 +189,40 @@ Do **not** add application-side `pause_core1`/`resume_core1`: the `embassy-rp` f
 already parks both cores around each flash operation, and the app must not enable
 `run-from-ram`.
 
+### OTA protocol (GL-10)
+
+`app/src/ota/` owns the DNS/TCP/TLS transport and the update task; the pure decision,
+parsers and streaming session live in `core/src/ota/`. The device fetches three URLs, each a
+`GET` with `Connection: close`, rooted at `{OTA_URL}/{OTA_PROJECT}/`:
+
+| Request | Response body |
+|---|---|
+| `version` | the published version as a bare integer |
+| `{version}.bin.sha256` | lowercase hex SHA-256 of the image (64 chars, optional trailing newline) |
+| `{version}.bin` | the raw image for the ACTIVE slot |
+
+Fetch order is `version` → `{version}.bin.sha256` → `{version}.bin`. An update is attempted
+when the published version **differs** from the running `garagelight_app::VERSION`; a `404` on
+any of the three is **transient** (logged, no retry loop — the next boot or `garagelight/reset`
+trigger re-checks).
+
+- **Transport** — `https` uses TLS 1.3 (`embedded-tls`). Certificate verification is
+  **disabled** (`UnsecureProvider`): the session is encrypted but the server is not
+  authenticated. `http://` is supported as a bench subset. `OTA_URL` may name a host (resolved
+  by DNS) or an IPv4 literal (which skips DNS).
+- **Auth** — HTTP Basic from `OTA_USER`/`OTA_PASSWORD`; the `Authorization` header is omitted
+  when both are empty. Credentials are never logged.
+- **Framing** — the server **must** send exactly one `Content-Length`. Chunked
+  `Transfer-Encoding` is rejected, as are a missing or duplicate `Content-Length`.
+- **Streaming bound** — the body is streamed in 4 KiB chunks and never buffered whole.
+  `Content-Length` must be ≤ the 780 KiB ACTIVE slot and is checked **before any flash write**,
+  so an oversize image touches no flash.
+- **Verify and roll back** — the stream is hashed with SHA-256 as it is written to DFU; a
+  mismatch aborts and nothing is marked. On success `mark_updated()` schedules the swap and the
+  device resets, with the bootloader reverting if the new image does not confirm. SHA-256
+  detects **accidental corruption only** — it is fetched from the same unauthenticated server,
+  so it is not tamper detection.
+
 ## Recovery (BOOTSEL / UF2 and DFU)
 
 **BOOTSEL / UF2 mass-storage recovery.** The RP2040 ROM bootloader is always available, even
@@ -308,12 +342,12 @@ fault indication.
 - **Polarity unverified** — `LAMP_ON_LEVEL` (`true`, active-high) is a single constant; no
   lamp is attached to the prototype, so the wiring polarity is confirmed at cutover.
 
-### WiFi station without DNS (GL-7)
+### WiFi station and DNS (GL-7, GL-10)
 
-GL-7 adds the station join and reconnect supervisor, but builds `embassy-net` **without the
-`dns` feature**: nothing in the firmware resolves a hostname yet. Until hostname resolution
-lands with the consumer that needs it (MQTT in GL-8, OTA in GL-10), the configured
-`MQTT_BROKER` and `OTA_URL` must be **IP literals**, not hostnames.
+GL-7 adds the station join and reconnect supervisor. It built `embassy-net` **without the
+`dns` feature**, so at that point the configured `MQTT_BROKER` and `OTA_URL` had to be **IP
+literals**, not hostnames. **GL-10** enables `dns` and resolves `OTA_URL` when it names a host;
+an IPv4 literal is still accepted and skips DNS. `MQTT_BROKER` is unchanged by GL-10.
 
 ### MQTT telemetry (GL-8)
 

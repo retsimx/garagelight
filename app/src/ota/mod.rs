@@ -22,6 +22,7 @@ use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
+use crate::beacon::SharedControl;
 use crate::update;
 
 use task::ota_task;
@@ -36,9 +37,16 @@ pub fn trigger() {
 }
 
 /// Spawn the OTA task. The task owns `updater` for the life of the program and
-/// only touches flash after a response head and a hash have been accepted.
-pub fn spawn(spawner: Spawner, stack: Stack<'static>, updater: update::Updater) {
-    spawner.spawn(ota_task(stack, updater).unwrap());
+/// only touches flash after a response head and a hash have been accepted. It
+/// shares the cyw43 control channel so a failed check can blink its stage on
+/// the onboard LED when no probe or device log is available.
+pub fn spawn(
+    spawner: Spawner,
+    stack: Stack<'static>,
+    updater: update::Updater,
+    control: &'static SharedControl,
+) {
+    spawner.spawn(ota_task(stack, updater, control).unwrap());
 }
 
 /// A fixed-capacity `core::fmt::Write` sink for requests and short names.
@@ -137,6 +145,43 @@ impl OtaError {
             OtaError::Sha => "sha",
             OtaError::Transport(error) => error.code(),
             OtaError::Update(code) => code,
+        }
+    }
+
+    /// Number of LED blinks that report where an OTA check failed. Grouped by
+    /// stage: 1 resolver, 2 reach, 3 handshake, 4 deadline, 5 request/response,
+    /// 6 hash, 7 apply/flash. A human reports the count when no probe is attached.
+    pub(super) fn blink_code(&self) -> u32 {
+        match self {
+            OtaError::Dns => 1,
+            OtaError::Connect => 2,
+            OtaError::Tls => 3,
+            OtaError::Timeout => 4,
+            OtaError::Url
+            | OtaError::Request
+            | OtaError::Auth
+            | OtaError::Head
+            | OtaError::Version => 5,
+            OtaError::Sha => 6,
+            OtaError::Update(code) => match *code {
+                "hash_mismatch" => 7,
+                "too_short" => 8,
+                "too_long" => 9,
+                "flash" => 10,
+                "read" => 11,
+                "oversize" => 12,
+                _ => 7,
+            },
+            OtaError::Transport(error) => match error {
+                FetchError::Timeout => 14,
+                FetchError::Write => 15,
+                FetchError::Flush => 16,
+                FetchError::Read => 17,
+                FetchError::Closed => 18,
+                FetchError::Leftover => 19,
+                FetchError::BodyTooLarge => 20,
+                FetchError::Head(_) => 21,
+            },
         }
     }
 }

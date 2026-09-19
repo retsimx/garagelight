@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = ["version-beacon", "ota-beacon"]
 radio-smoke = []
 update-selftest = []
 selftest-broken = ["update-selftest"]
 selftest-fail-ble = []
 lamp-latency = []
+ota-beacon = []
+version-beacon = []
 
 [[bin]]
 name = "garagelight-app"
@@ -66,8 +69,23 @@ dht-sensor = { workspace = true }
 # No `defmt`: the handshake error is logged as a bare line, and dropping the
 # feature keeps the embedded-tls `defmt::Format` impls out of the image (the
 # debug-profile FLASH budget is tight).
-embedded-tls = { version = "0.19", default-features = false }
+#
+# `rustpki` + `rsa` (and its implied `alloc`) are required to verify the
+# RSA-PSS/RSA-PKCS#1 handshake signature presented by the real endpoint's
+# Let's Encrypt RSA certificate. RSA verification allocates, so the crate's
+# `alloc` feature is on and the firmware provides a static heap (see
+# `src/heap.rs`).
+embedded-tls = { version = "0.19", default-features = false, features = ["rustpki", "rsa", "alloc"] }
 embedded-io-async = "0.7"
+# Static heap backing `embedded-tls`'s `alloc`-enabled RSA verification. Only
+# `llff` (linked-list first-fit) is enabled: the default also pulls `tlsf`
+# (and its `rlsf`/`const-default` deps), which the image does not use.
+embedded-alloc = { version = "0.6", default-features = false, features = ["llff"] }
+# `rsa` pulls `num-bigint-dig` -> `lazy_static` -> `spin`. thumbv6m has no
+# `compare_exchange`, so `spin` must use `portable-atomic` (backed by the
+# `critical-section` impl already enabled below) instead of `core` atomics.
+# `lazy_static` already enables spin's `once`; this only adds the backend.
+spin = { version = "0.9", default-features = false, features = ["portable_atomic"] }
 defmt = { workspace = true }
 defmt-rtt = { workspace = true }
 panic-probe = { workspace = true }

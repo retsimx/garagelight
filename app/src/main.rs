@@ -15,6 +15,10 @@ use garagelight_app::{
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    // First thing: the static heap must be ready before anything can allocate
+    // (the OTA TLS client's RSA verification allocates).
+    garagelight_app::heap::init();
+
     let p = embassy_rp::init(Default::default());
 
     let tx = uart::UartTx::new_blocking(p.UART0, p.PIN_0, uart::Config::default());
@@ -78,23 +82,44 @@ async fn main(spawner: Spawner) {
     // Bring up the onboard LED on the control path before WiFi starts, so the
     // control path's liveness never depends on the network.
     let mut control = radio.control;
-    logln!("led on");
-    control.gpio_set(0, true).await;
-    Timer::after(Duration::from_millis(500)).await;
-    logln!("led off");
-    control.gpio_set(0, false).await;
-    Timer::after(Duration::from_millis(500)).await;
+    #[cfg(feature = "version-beacon")]
+    {
+        // Blink the running VERSION on the onboard LED: N short blinks then a
+        // long gap. This is the physical evidence channel for OTA apply/revert
+        // when no debug probe or device log is available.
+        let n = garagelight_app::VERSION.max(1);
+        for _ in 0..n {
+            control.gpio_set(0, true).await;
+            Timer::after(Duration::from_millis(150)).await;
+            control.gpio_set(0, false).await;
+            Timer::after(Duration::from_millis(350)).await;
+        }
+        Timer::after(Duration::from_millis(1500)).await;
+    }
+    #[cfg(not(feature = "version-beacon"))]
+    {
+        // No boot LED when the version beacon is disabled; the LED is reserved
+        // for the OTA error code so a diagnostic build has an unambiguous signal.
+        let _ = &mut control;
+    }
+
+    // Share the cyw43 control channel: the net supervisor owns the join/leave
+    // path and the OTA task uses it to blink a failure code on the onboard LED.
+    static CTRL: static_cell::StaticCell<garagelight_app::beacon::SharedControl> =
+        static_cell::StaticCell::new();
+    let ctrl: &'static garagelight_app::beacon::SharedControl =
+        CTRL.init(embassy_sync::mutex::Mutex::new(control));
 
     // Network is best-effort and starts strictly after the control path. GL-8
     // (MQTT) and GL-10 (OTA) receive this handle and pass a copy to their tasks.
-    let stack = net::spawn(spawner, control, radio.net_device);
+    let stack = net::spawn(spawner, ctrl, radio.net_device);
     logln!("net supervisor spawned");
     telemetry::spawn(spawner, stack);
     logln!("mqtt telemetry spawned");
 
     let mut updater = update::Updater::new(p.FLASH);
     selftest::run(&mut updater).await;
-    ota::spawn(spawner, stack, updater);
+    ota::spawn(spawner, stack, updater, ctrl);
     logln!("ota task spawned");
     ota::trigger();
 

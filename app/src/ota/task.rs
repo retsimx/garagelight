@@ -11,7 +11,7 @@ use garagelight_core::ota::{
     apply_update, decide, parse_sha256_hex, parse_url, parse_version, Decision, UpdateError,
 };
 
-use crate::{logln, secrets, update};
+use crate::{beacon, logln, secrets, update};
 
 use super::transport::{
     build_request, open, resolve, HttpBody, READ_CHUNK, RECORD_BYTES, TCP_BYTES,
@@ -24,13 +24,22 @@ const NAME_MAX_BYTES: usize = 48;
 
 /// Wait for a trigger, then run one update check. The task owns `updater` for
 /// the life of the program and only touches flash after a response head and a
-/// hash have been accepted.
+/// hash have been accepted. A failed check blinks its stage code on the onboard
+/// LED (via the shared cyw43 control) so a human can report it without a probe.
 #[embassy_executor::task]
-pub(super) async fn ota_task(stack: Stack<'static>, mut updater: update::Updater) -> ! {
+pub(super) async fn ota_task(
+    stack: Stack<'static>,
+    mut updater: update::Updater,
+    control: &'static crate::beacon::SharedControl,
+) -> ! {
     loop {
         super::TRIGGER.wait().await;
-        if let Err(error) = check_and_update(stack, &mut updater).await {
-            logln!("ota_failed code={}", error.code());
+        match check_and_update(stack, &mut updater).await {
+            Ok(()) => {}
+            Err(error) => {
+                logln!("ota_failed code={}", error.code());
+                beacon::code(control, error.blink_code()).await;
+            }
         }
     }
 }

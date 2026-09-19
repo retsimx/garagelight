@@ -1274,6 +1274,7 @@ dependencies = [
  "embedded-storage-async",
  "embedded-tls",
  "garagelight-core",
+ "heapless",
  "minimq",
  "panic-probe",
  "portable-atomic",

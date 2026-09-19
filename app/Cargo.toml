@@ -34,6 +34,7 @@ required-features = ["update-selftest"]
 
 [dependencies]
 garagelight-core = { workspace = true }
+heapless = "0.9"
 
 [build-dependencies]
 # Host-only build dependency for fetching the (gitignored) CYW43 blobs at build

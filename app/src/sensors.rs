@@ -24,6 +24,11 @@ pub async fn wait_sample() -> Sample {
     SAMPLE.wait().await
 }
 
+/// Non-blocking check for a pending valid sample (GL-8 publishes only then).
+pub fn sample_pending() -> bool {
+    SAMPLE.signaled()
+}
+
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 

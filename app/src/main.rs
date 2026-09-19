@@ -9,7 +9,7 @@ use embassy_rp::uart;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_time::{Duration, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
-use garagelight_app::{ble, blobs, highpri, lamp, logging, logln, net, sensors, update};
+use garagelight_app::{ble, blobs, highpri, lamp, logging, logln, net, sensors, telemetry, update};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -85,8 +85,10 @@ async fn main(spawner: Spawner) {
 
     // Network is best-effort and starts strictly after the control path. GL-8
     // (MQTT) and GL-10 (OTA) receive this handle and pass a copy to their tasks.
-    let _stack = net::spawn(spawner, control, radio.net_device);
+    let stack = net::spawn(spawner, control, radio.net_device);
     logln!("net supervisor spawned");
+    telemetry::spawn(spawner, stack);
+    logln!("mqtt telemetry spawned");
 
     loop {
         Timer::after(Duration::from_secs(3600)).await;

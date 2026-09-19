@@ -6,8 +6,8 @@ The garage beam → lamp system: a beam breaks, the fact is published over BLE a
 telemetry, and the lamp reacts. This repository is the **Pico W firmware**, written in
 native Rust on `embassy-rp` for the RP2040. GL-1 stands up the buildable, flashable
 scaffold; GL-2 brings up the CYW43439 radio (WiFi + BLE coexistence); GL-3 installs the
-`embassy-boot-rp` A/B bootloader and the pinned flash partition table. DHT, MQTT and OTA
-behaviour arrive in later issues.
+`embassy-boot-rp` A/B bootloader and the pinned flash partition table. DHT sampling (GL-9)
+and MQTT telemetry (GL-8) are implemented; OTA behaviour arrives in a later issue.
 
 - Epic: [retsimx/garagelight#1](https://github.com/retsimx/garagelight/issues/1)
 - Bootstrap (GL-1): [retsimx/garagelight#2](https://github.com/retsimx/garagelight/issues/2)
@@ -267,7 +267,7 @@ Production `main.rs` initialises the radio, starts the BLE peripheral and GATT s
 (app/src/main.rs:68-76), and **then** calls `net::spawn` (app/src/main.rs:80). `net::spawn`
 builds the `embassy_net::Stack` over the net driver, spawns the runner and the
 never-returning reconnect supervisor (app/src/net.rs:42-50). GL-7 joins the AP and supervises
-the link; MQTT and OTA remain later issues.
+the link; MQTT telemetry (GL-8) is layered on top, and OTA remains a later issue.
 
 ### BLE peripheral / GATT (GL-5)
 
@@ -314,6 +314,60 @@ GL-7 adds the station join and reconnect supervisor, but builds `embassy-net` **
 `dns` feature**: nothing in the firmware resolves a hostname yet. Until hostname resolution
 lands with the consumer that needs it (MQTT in GL-8, OTA in GL-10), the configured
 `MQTT_BROKER` and `OTA_URL` must be **IP literals**, not hostnames.
+
+### MQTT telemetry (GL-8)
+
+GL-8 publishes the DHT11 sample to the configured broker and subscribes to a reset topic.
+`app/src/telemetry.rs` runs one task on core0, spawned after `net::spawn`
+(app/src/main.rs:90), so telemetry is best-effort and never resets the device.
+
+- **Session** — client id `garagelight` (`core/src/telemetry.rs:11`), keepalive 60 s
+  (`core/src/telemetry.rs:13`), no last-will, no auth and no TLS.
+- **Broker** — the `MQTT_BROKER` secret is a compile-time constant (fixed at startup) parsed
+  on each connect attempt as an IPv4 literal with an optional `mqtt://` scheme and optional
+  `:port` defaulting to 1883 (`core/src/telemetry.rs:72-81`). It accepts
+  `mqtt://IP:1883`, `IP:1883`, or a plain `IP`. Hostnames are rejected because the firmware
+  has no DNS (GL-7); the example value is `mqtt://CHANGE_ME:1883`.
+- **Publish** — topic `garage/temperature` (from `contract.toml` via
+  `core/src/contract.rs:19`), payload `{"temp": <int>, "humidity": <int>}`
+  (`core/src/telemetry.rs:58-67`), **QoS 0**, published once per fresh DHT11 sample (every
+  15 s; `core/src/sensor.rs:31`). A failed sensor read signals nothing and is not published.
+- **Subscribe** — `garagelight/reset` (`core/src/telemetry.rs:14`); any message on that
+  exact topic logs `mqtt_reset_received` and calls the `update::request_check()` OTA-check
+  entry point, currently a log-only stub (`app/src/update.rs:192`).
+- **Reconnect** — application-supervised: each attempt opens a fresh `TcpSocket` and session
+  handshake, then backs off 1 s doubling to a 60 s ceiling (`app/src/telemetry.rs:53-54`). A
+  fresh `Connected` broker session re-subscribes; a resumed `Reconnected` session keeps the
+  broker-side subscription. A broker restart resumes with no device reboot.
+- **Buffers** — `rx = 256` holds the largest inbound packet (a `garagelight/reset` publish);
+  `tx = 512` holds the CONNECT workspace plus the retained SUBSCRIBE plus a QoS-0 encode and
+  reconnect headroom; TCP rx/tx are 512 each (`app/src/telemetry.rs:39-42`). `minimq` is
+  pinned to `=0.13.3` (`Cargo.toml:22`) and no dependency was added: `embassy-net`'s
+  `TcpSocket` already implements the `embedded-io-async` traits.
+
+**Two deliberate deviations from the legacy MicroPython firmware:**
+
+- QoS 1 → **QoS 0** — the sample is periodic and loss-tolerant.
+- `minimq` is an **MQTT v5** client, so the broker must speak MQTT v5
+  (**mosquitto ≥ 1.6**); a v4-only broker will refuse the connect.
+
+**Bench verification (GL-8).** With the device joined and `MQTT_BROKER` pointing at
+`<broker>`:
+
+```sh
+# Observe the ~15 s cadence and payload.
+mosquitto_sub -h <broker> -t garage/temperature -v -V mqttv5
+
+# Trigger the reset path; the device log then shows
+# mqtt_reset_received and ota_check_requested.
+mosquitto_pub -h <broker> -t garagelight/reset -m reset
+```
+
+Restart mosquitto and confirm the device reconnects, re-subscribes and resumes publishing
+with no reboot.
+
+The MQTT v5 connect, the live ~15 s cadence, and the broker-restart recovery are **bench-only
+gates not covered by CI**.
 
 ### Dependency note — one embassy source
 

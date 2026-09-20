@@ -142,3 +142,16 @@ rationale is the interesting part; the conclusions are what the tracker enforces
 - **The honest counterweight**: see [retrospective.md](retrospective.md). Roughly two thirds of the
   delivered scope — and the majority of the review findings — are not required to make the lamp
   correct.
+
+## Decommissioning decisions
+
+- **Divergent `master` branch — retired and deleted.** It held an earlier single-crate
+  embassy attempt, fully superseded by `core/` + `app/` + `bootloader/`; nothing needed to
+  be mined from it.
+- **Committed proprietary blobs and private identifiers — purged from history.** The
+  Infineon/CYW43 firmware blobs and the real device MAC addresses / internal hosts
+  committed in earlier history are removed with a `git filter-repo` rewrite and a
+  coordinated force-push. Rationale: the repository is public and the blobs are proprietary
+  (Infineon Permissive Binary License). The current tree keeps the fetch-at-build policy and
+  `app/cyw43-firmware/` remains gitignored. Anyone with a clone must re-clone or hard-reset
+  after the rewrite.

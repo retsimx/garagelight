@@ -454,7 +454,7 @@ fault indication.
 
 - **Mapping** — `0x01` (broken) lights the lamp, `0x00` (intact) darkens it.
 - **Fault pattern** — a 2 s cycle, ~85 % lit (`1500` on / `150` off / `200` on / `150` off
-  ms, 1 flash/s), shown at boot, on link loss (≤ 1 s supervision timeout) and on a 30 s
+  ms, 1 flash/s), shown at boot, on link loss (≤ 8 s supervision timeout) and on a 30 s
   write-leash while connected. `app/src/ble.rs` enqueues `LampEvent::Fact`/`LinkDown`, and a
   20 ms `Tick` keeps the leash current.
 - **Single owner** — one state machine (`core/src/lamp.rs`, pure, host-tested with an

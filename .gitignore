@@ -10,9 +10,6 @@ app/cyw43-firmware/
 # Local secrets materialised from secrets.example.rs
 app/src/secrets.rs
 
-# Legacy MicroPython virtualenv
-venv
-
 # Local agent harness (rules, skills, results)
 .agents/
 

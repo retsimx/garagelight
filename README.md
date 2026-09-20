@@ -4,44 +4,25 @@
 
 The garage beam → lamp system: a beam breaks, the fact is published over BLE and
 telemetry, and the lamp reacts. This repository is the **Pico W firmware**, written in
-native Rust on `embassy-rp` for the RP2040. GL-1 stands up the buildable, flashable
-scaffold; GL-2 brings up the CYW43439 radio (WiFi + BLE coexistence); GL-3 installs the
-`embassy-boot-rp` A/B bootloader and the pinned flash partition table. DHT sampling (GL-9)
-and MQTT telemetry (GL-8) are implemented; OTA behaviour arrives in a later issue.
+native Rust on `embassy-rp` for the RP2040. It provides a buildable, flashable firmware
+with a CYW43439 radio bring-up (WiFi + BLE coexistence), an `embassy-boot-rp` A/B
+bootloader and pinned flash partition table, DHT11 sampling, MQTT telemetry, and
+over-the-air updates with a post-swap self-test and rollback.
 
-- Epic: [retsimx/garagelight#1](https://github.com/retsimx/garagelight/issues/1)
-- Bootstrap (GL-1): [retsimx/garagelight#2](https://github.com/retsimx/garagelight/issues/2)
-- Radio bring-up (GL-2): [retsimx/garagelight#3](https://github.com/retsimx/garagelight/issues/3)
-- Flash layout / A/B boot (GL-3): [retsimx/garagelight#4](https://github.com/retsimx/garagelight/issues/4)
-
-The legacy MicroPython firmware (`main.py`, `boot.py`, `ble.py`, `secrets.py`, …) is the
-previous generation and is not the current build.
+This repository contains a single firmware: the native Rust project.
 
 ## Toolchain
 
-`rust-toolchain.toml` pins:
-
-```toml
-[toolchain]
-channel = "1.98.1"
-components = ["rustfmt", "clippy", "llvm-tools-preview"]
-targets = ["thumbv6m-none-eabi"]
-```
-
-`rustup show` installs the pinned toolchain automatically on first use. If a bare-metal
-target is not yet present, add it explicitly:
+The pinned channel, components and targets live in `rust-toolchain.toml`; the dependency
+revisions live in `Cargo.toml` (`[patch.crates-io]`). `rustup show` installs the pinned
+toolchain automatically on first use. If a bare-metal target is not yet present, add it
+explicitly:
 
 ```sh
 rustup target add thumbv6m-none-eabi
 ```
 
-**Effective floor.** The pinned channel is **1.98.1** (stable). Edition-2024 crates in the
-dependency set require Rust ≥ 1.85; the design recorded a `trouble-host` floor of 1.80, so
-the effective floor was recorded as 1.85. On-disk verification of the resolved tree shows
-the binding constraint is actually higher — `bt-hci 0.10.1` declares
-`rust-version = "1.87"` and `minimq 0.13.3` declares `1.88` — so the true effective floor is
-1.88, which the pinned 1.98.1 clears. The three workspace crates themselves are edition
-2021.
+The three workspace crates are edition 2021.
 
 ## Layout
 
@@ -63,13 +44,13 @@ bootloader/  embassy-boot-rp A/B bootloader; owns boot2 and the pinned partition
   Hardware dependencies are gated under
   `[target.'cfg(target_arch = "arm")'.dependencies]`. It links
   `link.x` only (never `link-rp.x`) and carries no boot2.
-- `bootloader/` (`garagelight-bootloader`) is the GL-3 `embassy-boot-rp` A/B bootloader. It
+- `bootloader/` (`garagelight-bootloader`) is the `embassy-boot-rp` A/B bootloader. It
   links the stock `link-rp.x`, owns boot2, and swaps a pending DFU image into ACTIVE before
   booting ACTIVE. It is provisioned once over USB/SWD and is never updated OTA.
 
-## Flash layout / partition table (GL-3)
+## Flash layout / partition table
 
-The GL-3 bootloader owns the pinned 2 MiB partition table. Both `bootloader/memory.x` and
+The bootloader owns the pinned 2 MiB partition table. Both `bootloader/memory.x` and
 `app/memory.x` carry the same table; `core/src/layout.rs` holds the constants with `const`
 assertions, and host tests parse both linker scripts to catch drift.
 
@@ -106,20 +87,12 @@ The firmware version is the single bare integer in the repo-root `VERSION` file,
 it in the boot log. The build fails if `VERSION` is not a bare integer, or if
 `app/src/secrets.rs` is absent (the error names the `cp` above).
 
-Measure the image against the 780 KiB (798,720 B) budget:
+Measure the image against the 780 KiB (798,720 B) ACTIVE budget; CI enforces the same gate
+(`cargo size` on `garagelight-app`, failing above 798,720 B):
 
 ```sh
 cargo size --release --target thumbv6m-none-eabi -p garagelight-app
 ```
-
-Current measured size (all four blobs included):
-
-```
-   text    data     bss     dec     hex filename
- 360108      68   32208  392384   5fcc0 garagelight-app
-```
-
-**text 360,108 + data 68 = 360,176 B** against a budget of **798,720 B = 780 KiB**.
 
 ## Test
 
@@ -139,7 +112,7 @@ the bench runbook below.
 
 ## Provision and flash (USB / SWD)
 
-The GL-3 `embassy-boot-rp` bootloader replaces the temporary GL-1/GL-2 boot2 shim: it owns
+The `embassy-boot-rp` bootloader replaces the temporary/boot2 shim: it owns
 boot2 and is what runs from the reset vector, so the shim is no longer needed once the
 bootloader is provisioned. Flash the bootloader at `0x10000000`, then the ACTIVE application
 at `0x10006000`; every later reset boots through the bootloader:
@@ -189,7 +162,7 @@ Do **not** add application-side `pause_core1`/`resume_core1`: the `embassy-rp` f
 already parks both cores around each flash operation, and the app must not enable
 `run-from-ram`.
 
-### OTA protocol (GL-10)
+### OTA protocol
 
 `app/src/ota/` owns the DNS/TCP/TLS transport and the update task; the pure decision,
 parsers and streaming session live in `core/src/ota/`. The device fetches three URLs, each a
@@ -223,7 +196,7 @@ trigger re-checks).
   detects **accidental corruption only** — it is fetched from the same unauthenticated server,
   so it is not tamper detection.
 
-### Post-swap self-test (GL-11)
+### Post-swap self-test
 
 After the bootloader swaps DFU into ACTIVE, the new image **self-tests before confirming**.
 `get_state() == Swap` is true only on the first boot of a freshly swapped image, so the test
@@ -242,7 +215,7 @@ is the thin adapter that samples the four subsystem flags. Expected log lines:
 
 ```
 ota_selftest_start
-ota_selftest ble=… lamp=… wifi=… mqtt=… elapsed_ms=… verdict=…
+ota_selftest ble=… lamp=… wifi=… mqtt=… verdict=…
 ota_selftest_confirmed
 ota_selftest_failed
 ota_boot state=boot|revert|dfu_detach|error
@@ -343,8 +316,8 @@ cargo install cargo-binutils --locked
 The remote host must have `bash` for the retention prune (`ssh … bash -s`). If `bash` is
 absent the prune warns and is skipped; the release and the device trigger still complete.
 
-Transition note: the legacy MicroPython artifacts under the same OTA path are retired, so the
-device must already be running the Rust image (GL-13 cutover).
+Transition note: the pre-Rust artifacts that once occupied the same OTA path are retired,
+so the device must already be running the Rust image (cutover).
 
 ## Recovery (BOOTSEL / UF2 and DFU)
 
@@ -373,25 +346,20 @@ Four proprietary Infineon/CYW43 files are needed. They are **never committed**; 
 fetches any missing file (and the licence) at build time into the gitignored
 `app/cyw43-firmware/`.
 
-| File | Size | Role |
-|---|---:|---|
-| `43439A0.bin` | 231,077 B | WLAN firmware |
-| `43439A0_btfw.bin` | 6,164 B | Bluetooth firmware |
-| `nvram_rp2040.bin` | 742 B | Board NVRAM |
-| `43439A0_clm.bin` | 984 B | CLM |
-| **Total** | **238,967 B** | |
+| File | Role |
+|---|---|
+| `43439A0.bin` | WLAN firmware |
+| `43439A0_btfw.bin` | Bluetooth firmware |
+| `nvram_rp2040.bin` | Board NVRAM |
+| `43439A0_clm.bin` | CLM |
 
-Pinned source base URL (frozen embassy revision `3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a`,
-the same rev as the `[patch.crates-io]` pins):
-
-```
-https://github.com/embassy-rs/embassy/raw/3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a/cyw43-firmware/
-```
+The exact blob byte lengths are asserted in `app/build.rs` (`BLOB_SIZES`), alongside the
+frozen source revision.
 
 Licence: **Infineon Permissive Binary License**, fetched alongside the blobs as
 `LICENSE-permissive-binary-license-1.0.txt`.
 
-Recorded for GL-2 (the blobs are shaped so these calls work unchanged):
+Recorded for (the blobs are shaped so these calls work unchanged):
 
 ```rust
 cyw43::new_with_bluetooth(state, pwr, spi, WIFI_FW, BT_FW, NVRAM)
@@ -401,7 +369,7 @@ control.init(CLM)
 WLAN + BT + NVRAM go through `new_with_bluetooth`; **CLM is loaded via the
 `control.init(clm)` path**, not the constructor.
 
-## Radio bring-up (GL-2)
+## Radio bring-up
 
 `app/src/radio.rs` initialises the on-board CYW43439 combo radio once per boot and returns
 the WiFi net driver, the `cyw43` control handle and the BLE controller:
@@ -417,20 +385,20 @@ the WiFi net driver, the `cyw43` control handle and the BLE controller:
   GPIO.
 - **BLE** — the Bluetooth driver is wrapped in
   `trouble_host::prelude::ExternalController` (the `BleController` type in
-  `app/src/radio.rs`); GL-5 builds the peripheral and GATT server on top of it (below).
+  `app/src/radio.rs`); the BLE layer builds the peripheral and GATT server on top of it.
 
 Production `main.rs` initialises the radio, starts the BLE peripheral and GATT server via
-`ble::spawn` (app/src/main.rs:65), brings up the onboard-LED control path
-(app/src/main.rs:68-76), and **then** calls `net::spawn` (app/src/main.rs:80). `net::spawn`
-builds the `embassy_net::Stack` over the net driver, spawns the runner and the
-never-returning reconnect supervisor (app/src/net.rs:42-50). GL-7 joins the AP and supervises
-the link; MQTT telemetry (GL-8) is layered on top, and OTA remains a later issue.
+`ble::spawn` (app/src/main.rs), brings up the onboard-LED control path
+(app/src/main.rs), and **then** calls `net::spawn` (app/src/main.rs). `net::spawn`
+builds the `embassy_net::Stack` over the net driver and spawns the runner and the
+never-returning reconnect supervisor (app/src/net.rs), which joins the AP and
+supervises the link. MQTT telemetry and OTA are layered on top.
 
-### BLE peripheral / GATT (GL-5)
+### BLE peripheral / GATT
 
-GL-5 brings up the trouble-host BLE peripheral and GATT server. `main.rs` calls `ble::spawn`
-immediately after `radio::init` and before the WiFi/net stack, so the control path is
-independent of WiFi.
+The BLE layer brings up the trouble-host BLE peripheral and GATT server. `main.rs` calls
+`ble::spawn` immediately after `radio::init` and before the WiFi/net stack, so the control
+path is independent of WiFi.
 
 - **GATT contract** — `app/src/gatt.rs` defines the beam service from the shared contract:
   service `6a4c0001-b5a3-4f1e-9c2d-7e8f9a0b1c2d`, characteristic
@@ -447,9 +415,9 @@ independent of WiFi.
 - **Not done** — the peripheral never initiates a connection-parameter update, and there is
   no pairing, encryption or bonding.
 
-### Lamp control path (GL-6)
+### Lamp control path
 
-GL-6 drives the lamp on GPIO28 from the validated beam fact and owns the "state unknown"
+drives the lamp on GPIO28 from the validated beam fact and owns the "state unknown"
 fault indication.
 
 - **Mapping** — `0x01` (broken) lights the lamp, `0x00` (intact) darkens it.
@@ -465,50 +433,50 @@ fault indication.
 - **Polarity unverified** — `LAMP_ON_LEVEL` (`true`, active-high) is a single constant; no
   lamp is attached to the prototype, so the wiring polarity is confirmed at cutover.
 
-### WiFi station and DNS (GL-7, GL-10)
+### WiFi station and DNS
 
-GL-7 adds the station join and reconnect supervisor. It built `embassy-net` **without the
-`dns` feature**, so at that point the configured `MQTT_BROKER` and `OTA_URL` had to be **IP
-literals**, not hostnames. **GL-10** enables `dns` and resolves `OTA_URL` when it names a host;
-an IPv4 literal is still accepted and skips DNS. `MQTT_BROKER` is unchanged by GL-10.
+The network supervisor joins the AP and reconnects it as needed. `embassy-net` is built
+**without the `dns` feature**, so the configured `MQTT_BROKER` is an **IP literal**, not a
+hostname. The OTA transport enables `dns` and resolves `OTA_URL` when it names a host; an
+IPv4 literal is still accepted and skips DNS. `MQTT_BROKER` remains an IP literal.
 
-### MQTT telemetry (GL-8)
+### MQTT telemetry
 
-GL-8 publishes the DHT11 sample to the configured broker and subscribes to a reset topic.
-`app/src/telemetry.rs` runs one task on core0, spawned after `net::spawn`
-(app/src/main.rs:90), so telemetry is best-effort and never resets the device.
+The telemetry task publishes the DHT11 sample to the configured broker and subscribes to a
+reset topic. `app/src/telemetry.rs` runs one task on core0, spawned after `net::spawn`
+(app/src/main.rs), so telemetry is best-effort and never resets the device.
 
-- **Session** — client id `garagelight` (`core/src/telemetry.rs:11`), keepalive 60 s
-  (`core/src/telemetry.rs:13`), no last-will, no auth and no TLS.
+- **Session** — client id `garagelight` (`core/src/telemetry.rs`), keepalive 60 s
+  (`core/src/telemetry.rs`), no last-will, no auth and no TLS.
 - **Broker** — the `MQTT_BROKER` secret is a compile-time constant (fixed at startup) parsed
   on each connect attempt as an IPv4 literal with an optional `mqtt://` scheme and optional
-  `:port` defaulting to 1883 (`core/src/telemetry.rs:72-81`). It accepts
+  `:port` defaulting to 1883 (`core/src/telemetry.rs`). It accepts
   `mqtt://IP:1883`, `IP:1883`, or a plain `IP`. Hostnames are rejected because the firmware
-  has no DNS (GL-7); the example value is `mqtt://CHANGE_ME:1883`.
+  has no DNS; the example value is `mqtt://CHANGE_ME:1883`.
 - **Publish** — topic `garage/temperature` (from `contract.toml` via
-  `core/src/contract.rs:19`), payload `{"temp": <int>, "humidity": <int>}`
-  (`core/src/telemetry.rs:58-67`), **QoS 0**, published once per fresh DHT11 sample (every
-  15 s; `core/src/sensor.rs:31`). A failed sensor read signals nothing and is not published.
-- **Subscribe** — `garagelight/reset` (`core/src/telemetry.rs:14`); any message on that
+  `core/src/contract.rs`), payload `{"temp": <int>, "humidity": <int>}`
+  (`core/src/telemetry.rs`), **QoS 0**, published once per fresh DHT11 sample (every
+  15 s; `core/src/sensor.rs`). A failed sensor read signals nothing and is not published.
+- **Subscribe** — `garagelight/reset` (`core/src/telemetry.rs`); any message on that
   exact topic logs `mqtt_reset_received` and calls the `update::request_check()` OTA-check
-  entry point, currently a log-only stub (`app/src/update.rs:192`).
+  entry point, currently a log-only stub (`app/src/update.rs`).
 - **Reconnect** — application-supervised: each attempt opens a fresh `TcpSocket` and session
-  handshake, then backs off 1 s doubling to a 60 s ceiling (`app/src/telemetry.rs:53-54`). A
+  handshake, then backs off 1 s doubling to a 60 s ceiling (`app/src/telemetry.rs`). A
   fresh `Connected` broker session re-subscribes; a resumed `Reconnected` session keeps the
   broker-side subscription. A broker restart resumes with no device reboot.
 - **Buffers** — `rx = 256` holds the largest inbound packet (a `garagelight/reset` publish);
   `tx = 512` holds the CONNECT workspace plus the retained SUBSCRIBE plus a QoS-0 encode and
-  reconnect headroom; TCP rx/tx are 512 each (`app/src/telemetry.rs:39-42`). `minimq` is
-  pinned to `=0.13.3` (`Cargo.toml:22`) and no dependency was added: `embassy-net`'s
+  reconnect headroom; TCP rx/tx are 512 each (`app/src/telemetry.rs`). `minimq` is
+  pinned exactly in `Cargo.toml` and no dependency was added: `embassy-net`'s
   `TcpSocket` already implements the `embedded-io-async` traits.
 
-**Two deliberate deviations from the legacy MicroPython firmware:**
+**Two deliberate design choices:**
 
 - QoS 1 → **QoS 0** — the sample is periodic and loss-tolerant.
 - `minimq` is an **MQTT v5** client, so the broker must speak MQTT v5
   (**mosquitto ≥ 1.6**); a v4-only broker will refuse the connect.
 
-**Bench verification (GL-8).** With the device joined and `MQTT_BROKER` pointing at
+**Bench verification.** With the device joined and `MQTT_BROKER` pointing at
 `<broker>`:
 
 ```sh
@@ -529,7 +497,7 @@ gates not covered by CI**.
 ### Dependency note — one embassy source
 
 The workspace `[patch.crates-io]` pins **`embassy-net-driver` only** to the same embassy
-revision as `cyw43`; `embassy-net` itself stays on the crates.io release (`0.9.1`, smoltcp).
+revision as `cyw43`; `embassy-net` itself stays on the crates.io release (smoltcp).
 Without the driver patch, `cyw43::NetDriver` implements the git `embassy-net-driver` trait
 while crates.io `embassy-net` expects its own registry copy, so `embassy_net::Stack` fails
 to type-check with `E0277` ("multiple different versions of crate `embassy_net_driver`").
@@ -537,11 +505,10 @@ Patching only the driver crate unifies both halves on one driver trait, which is
 smallest change that compiles. Patching `embassy-net` too would needlessly swap the whole
 network backend to the git rev's `xarxa` stack.
 
-The BLE stack versions are pinned by `Cargo.lock`: **`trouble-host 0.8.0`**,
-**`bt-hci 0.10.1`** and **`btuuid 0.1.1`**, resolved from the workspace
-`trouble-host = "0.8"` / `bt-hci = "0.10"` requirements in `Cargo.toml`.
+The BLE stack versions are pinned by `Cargo.lock`, resolved from the workspace
+requirements in `Cargo.toml`.
 
-## Bench / hardware verification runbook (GL-2)
+## Bench / hardware verification runbook
 
 The radio path is hardware-only; verification is an L3 bench run. A spare Pico W is flashed
 with the Raspberry Pi `debugprobe` firmware and wired as the SWD probe for the target.
@@ -582,7 +549,7 @@ confirms the device is visible).
 
 **Build and run**
 
-Provision the GL-3 bootloader once with the *Provision and flash* commands above, then run
+Provision the bootloader once with the *Provision and flash* commands above, then run
 the bench binary — a normal reset boots ACTIVE through the bootloader. If the probe's reset
 line is not wired, use `probe-rs reset` then a fresh `probe-rs attach` to stream RTT:
 
@@ -591,7 +558,7 @@ cargo build --release --target thumbv6m-none-eabi --features radio-smoke --bin r
 probe-rs run --chip RP2040 target/thumbv6m-none-eabi/release/radio_smoke
 ```
 
-The GL-1/GL-2 `scripts/boot2_shim.py` workaround is superseded by the real bootloader and is
+The/`scripts/boot2_shim.py` workaround is superseded by the real bootloader and is
 no longer used. If the bench board is blank, flash the bootloader and the ACTIVE app first as
 in *Provision and flash*.
 
@@ -627,36 +594,13 @@ output of this run.
 - **contract** — fetches
   `https://raw.githubusercontent.com/retsimx/garagebeam/main/contract.toml` and compares it
   byte-for-byte with the local `contract.toml`, failing on any difference. While the sibling
-  mirror (GB-7) does not exist the raw fetch 404s, so the job emits a warning and skips; it
+  mirror does not exist the raw fetch 404s, so the job emits a warning and skips; it
   hard-fails automatically once the file lands.
-
-## `master`-branch review
-
-The earlier single-crate embassy attempt on `master` was reviewed before this scaffold.
-
-**Reused (adapted):**
-
-- The `build.rs` "copy `memory.x` to `OUT_DIR` + `rustc-link-search` + `rerun-if-changed`"
-  pattern.
-- The `probe-rs run --chip RP2040` runner and `DEFMT_LOG` env in `.cargo/config.toml`.
-- The watchdog-feed task shape (`start` + periodic `feed`).
-- The CYW43 Pico W pin wiring recorded for GL-2: power `PIN_23`, CS `PIN_25`, SPI data
-  `PIN_24`, SPI clock `PIN_29`, `PIO0`, `DMA_CH0`/`DMA_CH1`.
-
-**Superseded:**
-
-| Old (`master`) | New | Why |
-|---|---|---|
-| Single crate | `core/` + `app/` + `bootloader/` | pure host-testable policy must be split from hardware; separate bootloader binary |
-| `nightly-2023-07-17` + git-`main` embassy deps | pinned stable **1.98.1** + `[patch.crates-io]` to frozen rev `3cd51e6d…` | reproducibility and a known-good `trouble-host`/`cyw43` BLE set |
-| App linked `-Tlink-rp.x` | app links `link.x` + `defmt.x` only | the app must not embed boot2; the bootloader owns it (GL-3) |
-| Two committed blobs (`43439A0.bin`, `43439A0_clm.bin`) | four blobs, build-time fetched, gitignored | licence compliance + complete set (BT firmware and NVRAM were missing) |
-| `env!("WIFI_*")` secrets | `app/src/secrets.rs` from `secrets.example.rs` (gitignored) | one-time copy in a clean checkout; GL-2 owns WiFi |
-| No UART, reset reason or version | UART0 115200 + reset reason + version | field observability |
 
 ## Contract
 
 `contract.toml` is the shared BLE GATT / connection / telemetry contract. It is vendored
-byte-identically in the sibling `retsimx/garagebeam` repository (GB-7). The `core` crate
+byte-identically in the sibling `retsimx/garagebeam` repository. The `core` crate
 holds the constants and a host test asserts each of them against the file; CI additionally
 checks cross-repo byte equality.
+

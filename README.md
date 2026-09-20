@@ -446,7 +446,7 @@ The telemetry task publishes the DHT11 sample to the configured broker and subsc
 reset topic. `app/src/telemetry.rs` runs one task on core0, spawned after `net::spawn`
 (app/src/main.rs), so telemetry is best-effort and never resets the device.
 
-- **Session** — client id `garagelight` (`core/src/telemetry.rs`), keepalive 60 s
+- **Session** — a per-device client id derived from the WiFi MAC, keepalive 60 s
   (`core/src/telemetry.rs`), no last-will, no auth and no TLS.
 - **Broker** — the `MQTT_BROKER` secret is a compile-time constant (fixed at startup) parsed
   on each connect attempt as an IPv4 literal with an optional `mqtt://` scheme and optional

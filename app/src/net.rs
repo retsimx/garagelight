@@ -28,7 +28,7 @@ const DHCP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Reconnect backoff: 1s, doubling to a 60s ceiling, reset on every association.
 const BACKOFF_INITIAL_SECS: u64 = 30;
-const BACKOFF_MAX_SECS: u64 = 300;
+const BACKOFF_MAX_SECS: u64 = 120;
 
 const NET_SEED: u64 = 0x1234_5678_9abc_def0;
 

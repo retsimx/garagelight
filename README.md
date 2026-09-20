@@ -13,29 +13,16 @@ This repository contains a single firmware: the native Rust project.
 
 ## Toolchain
 
-`rust-toolchain.toml` pins:
-
-```toml
-[toolchain]
-channel = "1.98.1"
-components = ["rustfmt", "clippy", "llvm-tools-preview"]
-targets = ["thumbv6m-none-eabi"]
-```
-
-`rustup show` installs the pinned toolchain automatically on first use. If a bare-metal
-target is not yet present, add it explicitly:
+The pinned channel, components and targets live in `rust-toolchain.toml`; the dependency
+revisions live in `Cargo.toml` (`[patch.crates-io]`). `rustup show` installs the pinned
+toolchain automatically on first use. If a bare-metal target is not yet present, add it
+explicitly:
 
 ```sh
 rustup target add thumbv6m-none-eabi
 ```
 
-**Effective floor.** The pinned channel is **1.98.1** (stable). Edition-2024 crates in the
-dependency set require Rust ≥ 1.85; the design recorded a `trouble-host` floor of 1.80, so
-the effective floor was recorded as 1.85. On-disk verification of the resolved tree shows
-the binding constraint is actually higher — `bt-hci 0.10.1` declares
-`rust-version = "1.87"` and `minimq 0.13.3` declares `1.88` — so the true effective floor is
-1.88, which the pinned 1.98.1 clears. The three workspace crates themselves are edition
-2021.
+The three workspace crates are edition 2021.
 
 ## Layout
 
@@ -100,20 +87,12 @@ The firmware version is the single bare integer in the repo-root `VERSION` file,
 it in the boot log. The build fails if `VERSION` is not a bare integer, or if
 `app/src/secrets.rs` is absent (the error names the `cp` above).
 
-Measure the image against the 780 KiB (798,720 B) budget:
+Measure the image against the 780 KiB (798,720 B) ACTIVE budget; CI enforces the same gate
+(`cargo size` on `garagelight-app`, failing above 798,720 B):
 
 ```sh
 cargo size --release --target thumbv6m-none-eabi -p garagelight-app
 ```
-
-Current measured size (all four blobs included):
-
-```
-   text    data     bss     dec     hex filename
- 360108      68   32208  392384   5fcc0 garagelight-app
-```
-
-**text 360,108 + data 68 = 360,176 B** against a budget of **798,720 B = 780 KiB**.
 
 ## Test
 
@@ -236,7 +215,7 @@ is the thin adapter that samples the four subsystem flags. Expected log lines:
 
 ```
 ota_selftest_start
-ota_selftest ble=… lamp=… wifi=… mqtt=… elapsed_ms=… verdict=…
+ota_selftest ble=… lamp=… wifi=… mqtt=… verdict=…
 ota_selftest_confirmed
 ota_selftest_failed
 ota_boot state=boot|revert|dfu_detach|error
@@ -367,20 +346,15 @@ Four proprietary Infineon/CYW43 files are needed. They are **never committed**; 
 fetches any missing file (and the licence) at build time into the gitignored
 `app/cyw43-firmware/`.
 
-| File | Size | Role |
-|---|---:|---|
-| `43439A0.bin` | 231,077 B | WLAN firmware |
-| `43439A0_btfw.bin` | 6,164 B | Bluetooth firmware |
-| `nvram_rp2040.bin` | 742 B | Board NVRAM |
-| `43439A0_clm.bin` | 984 B | CLM |
-| **Total** | **238,967 B** | |
+| File | Role |
+|---|---|
+| `43439A0.bin` | WLAN firmware |
+| `43439A0_btfw.bin` | Bluetooth firmware |
+| `nvram_rp2040.bin` | Board NVRAM |
+| `43439A0_clm.bin` | CLM |
 
-Pinned source base URL (frozen embassy revision `3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a`,
-the same rev as the `[patch.crates-io]` pins):
-
-```
-https://github.com/embassy-rs/embassy/raw/3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a/cyw43-firmware/
-```
+The exact blob byte lengths are asserted in `app/build.rs` (`BLOB_SIZES`), alongside the
+frozen source revision.
 
 Licence: **Infineon Permissive Binary License**, fetched alongside the blobs as
 `LICENSE-permissive-binary-license-1.0.txt`.
@@ -493,7 +467,7 @@ reset topic. `app/src/telemetry.rs` runs one task on core0, spawned after `net::
 - **Buffers** — `rx = 256` holds the largest inbound packet (a `garagelight/reset` publish);
   `tx = 512` holds the CONNECT workspace plus the retained SUBSCRIBE plus a QoS-0 encode and
   reconnect headroom; TCP rx/tx are 512 each (`app/src/telemetry.rs`). `minimq` is
-  pinned to `=0.13.3` (`Cargo.toml`) and no dependency was added: `embassy-net`'s
+  pinned exactly in `Cargo.toml` and no dependency was added: `embassy-net`'s
   `TcpSocket` already implements the `embedded-io-async` traits.
 
 **Two deliberate design choices:**
@@ -523,7 +497,7 @@ gates not covered by CI**.
 ### Dependency note — one embassy source
 
 The workspace `[patch.crates-io]` pins **`embassy-net-driver` only** to the same embassy
-revision as `cyw43`; `embassy-net` itself stays on the crates.io release (`0.9.1`, smoltcp).
+revision as `cyw43`; `embassy-net` itself stays on the crates.io release (smoltcp).
 Without the driver patch, `cyw43::NetDriver` implements the git `embassy-net-driver` trait
 while crates.io `embassy-net` expects its own registry copy, so `embassy_net::Stack` fails
 to type-check with `E0277` ("multiple different versions of crate `embassy_net_driver`").
@@ -531,9 +505,8 @@ Patching only the driver crate unifies both halves on one driver trait, which is
 smallest change that compiles. Patching `embassy-net` too would needlessly swap the whole
 network backend to the git rev's `xarxa` stack.
 
-The BLE stack versions are pinned by `Cargo.lock`: **`trouble-host 0.8.0`**,
-**`bt-hci 0.10.1`** and **`btuuid 0.1.1`**, resolved from the workspace
-`trouble-host = "0.8"` / `bt-hci = "0.10"` requirements in `Cargo.toml`.
+The BLE stack versions are pinned by `Cargo.lock`, resolved from the workspace
+requirements in `Cargo.toml`.
 
 ## Bench / hardware verification runbook
 

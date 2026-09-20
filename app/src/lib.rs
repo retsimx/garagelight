@@ -1,8 +1,13 @@
 #![no_std]
 
+pub mod beacon;
 pub mod ble;
 pub mod blobs;
 pub mod gatt;
+// The static heap exists only on the firmware target; host (test) builds do not
+// link `embedded-alloc` and must not define a global allocator.
+#[cfg(target_arch = "arm")]
+pub mod heap;
 pub mod highpri;
 pub mod lamp;
 pub mod logging;

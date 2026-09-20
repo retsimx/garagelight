@@ -96,10 +96,10 @@ Full normative detail: [`garagelight#6`](https://github.com/retsimx/garagelight/
 | Service / characteristic | Custom 128-bit UUIDs; **read + write-without-response**; exactly 1 byte; other values ignored and logged |
 | Value semantics | `0x00` beam intact, `0x01` beam broken — the **fact**, not a command. `read` returns the last applied fact, and `0x00` before the first write (documented as "no fact received yet") |
 | Advertising | Connectable, 30 ms, service UUID in the payload, a generic appearance (the bogus thermometer is gone), no pairing |
-| Connection | **Interval 7.5 ms** (the BLE minimum), slave latency 0, supervision timeout 1000 ms; requested by the central and re-applied if it drifts; the peripheral never counters |
+| Connection | **Interval 7.5 ms** (the BLE minimum), slave latency 0, supervision timeout 8000 ms; requested by the central and re-applied if it drifts; the peripheral never counters |
 | Writes | `WriteType::WithoutResponse`, on change, once after each (re)connect for resync, plus a **silent 10 s keepalive with no log line** |
 | Lamp policy | broken → ON, intact → OFF; a `LAMP_ON_LEVEL` constant owned by the device that knows the wiring |
-| Safe state | The **fault indication** (a distinctive double-dip, ~85 % lit, 1 flash/s) at boot, on link loss (≤ 1 s via the supervision timeout), and on staleness |
+| Safe state | The **fault indication** (a distinctive double-dip, ~85 % lit, 1 flash/s) at boot, on link loss (≤ 8 s via the supervision timeout), and on staleness |
 | Staleness | A peripheral-side **write-leash**: connected but no valid write for 30 s ⇒ fault indication. This is what covers a *hung* central, which the supervision timeout cannot see |
 | Boot ordering | Radio + BLE + lamp **first**; WiFi/OTA/mesh afterwards and asynchronously; **never reset because WiFi is down** |
 | Multicore | core0: radio, the BLE/GATT stack, the lamp apply, and the DFU writer. core1: the DHT11 read, telemetry formatting, logging. Cross-core via the chip's multicore-safe mutex |

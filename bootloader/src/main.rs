@@ -9,6 +9,7 @@
 #![no_std]
 #![no_main]
 
+use core::alloc::{GlobalAlloc, Layout};
 use core::cell::RefCell;
 
 use cortex_m_rt::{entry, exception};
@@ -18,6 +19,30 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Duration;
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
+
+/// Fail-fast global allocator.
+///
+/// The app enables `embedded-tls`'s `rsa` feature, and the `rsa` crate
+/// unconditionally turns on the `alloc` feature of `digest` and `signature`.
+/// `embassy-boot` — shared by the app and this bootloader — depends on both
+/// crates, so Cargo's workspace feature unification compiles them here with
+/// `alloc`, and rustc therefore requires a global allocator for this binary.
+///
+/// The bootloader performs no heap allocation (`embassy-boot`'s signature
+/// verification is compiled out; `_verify` is off). This allocator exists only
+/// to satisfy the linker and to fault loudly if that assumption is ever broken.
+struct NoAlloc;
+
+unsafe impl GlobalAlloc for NoAlloc {
+    unsafe fn alloc(&self, _layout: Layout) -> *mut u8 {
+        core::ptr::null_mut()
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+}
+
+#[global_allocator]
+static NO_ALLOC: NoAlloc = NoAlloc;
 
 #[entry]
 fn main() -> ! {

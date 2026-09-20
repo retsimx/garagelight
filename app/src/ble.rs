@@ -8,7 +8,7 @@ use trouble_host::att::{AttClient, AttReq};
 use trouble_host::prelude::*;
 
 use crate::gatt::Server;
-use crate::lamp::{LampEvent, EVENTS};
+use crate::lamp::LampEvent;
 use crate::logln;
 use crate::radio::BleController;
 
@@ -121,7 +121,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
             Ok(conn) => conn,
             Err(_) => {
                 logln!("ble_advertise_stopped");
-                let _ = EVENTS.try_send(LampEvent::LinkDown);
+                crate::lamp::post(LampEvent::LinkDown);
                 continue;
             }
         };
@@ -133,7 +133,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
             }
             Err(_) => {
                 logln!("ble_gatt_err");
-                let _ = EVENTS.try_send(LampEvent::LinkDown);
+                crate::lamp::post(LampEvent::LinkDown);
                 continue;
             }
         };
@@ -142,7 +142,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
             match conn.next().await {
                 GattConnectionEvent::Disconnected { .. } => {
                     logln!("ble_disconnected");
-                    let _ = EVENTS.try_send(LampEvent::LinkDown);
+                    crate::lamp::post(LampEvent::LinkDown);
                     break;
                 }
                 GattConnectionEvent::Gatt {
@@ -172,7 +172,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
                     match parsed {
                         Some(fact) => match event.accept() {
                             Ok(_) => {
-                                let _ = EVENTS.try_send(LampEvent::Fact(fact));
+                                crate::lamp::post_fact(fact);
                                 logln!("ble_fact value={}", first.unwrap_or(0));
                             }
                             Err(_) => logln!("ble_write_apply_err"),

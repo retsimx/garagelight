@@ -60,10 +60,21 @@ pub async fn apply_update<F: Flasher, R: BodyReader>(
     let mut hasher = Sha256::new();
     let mut offset = 0usize;
     let mut total: u64 = 0;
-    loop {
-        let n = body.read(&mut buf).await.map_err(UpdateError::Read)?;
+    // Read exactly `content_length` bytes: never issue a read past the body.
+    // A read after the last byte can error on connection close (the server may
+    // drop the socket without a TLS close_notify), which must not fail an
+    // otherwise complete, verified image.
+    while total < content_length {
+        let remaining = (content_length - total).min(buf.len() as u64) as usize;
+        let n = body
+            .read(&mut buf[..remaining])
+            .await
+            .map_err(UpdateError::Read)?;
         if n == 0 {
             break;
+        }
+        if n > remaining {
+            return Err(UpdateError::TooLong);
         }
         total += n as u64;
         hasher.update(&buf[..n]);
@@ -72,9 +83,6 @@ pub async fn apply_update<F: Flasher, R: BodyReader>(
             .await
             .map_err(UpdateError::Flash)?;
         offset += n;
-        if total > content_length {
-            return Err(UpdateError::TooLong);
-        }
     }
 
     if total != content_length {

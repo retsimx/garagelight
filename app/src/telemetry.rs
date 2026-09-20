@@ -22,6 +22,7 @@
 //!   replay state, but the SUBSCRIBE is retained until SUBACK; 512 is ~4x the
 //!   worst-case single encode.
 
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
@@ -32,8 +33,7 @@ use minimq::{Buffers, ConfigBuilder, ConnectEvent, Publication, QoS, Session, To
 
 use garagelight_core::contract::MQTT_TOPIC;
 use garagelight_core::telemetry::{
-    self, classify_inbound, encode_sample, Inbound, CLIENT_ID, KEEPALIVE_SECS, MAX_SAMPLE_PAYLOAD,
-    RESET_TOPIC,
+    self, classify_inbound, encode_sample, Inbound, KEEPALIVE_SECS, MAX_SAMPLE_PAYLOAD, RESET_TOPIC,
 };
 
 use crate::{logln, secrets, sensors, update};
@@ -76,9 +76,22 @@ pub fn spawn(spawner: Spawner, stack: Stack<'static>) {
 async fn telemetry_task(stack: Stack<'static>) -> ! {
     let mut rx = [0u8; RX_BYTES];
     let mut tx = [0u8; TX_BYTES];
+
+    // A unique client id per device. A shared id makes the broker kick one
+    // device off whenever another connects, so two units flap each other off
+    // the broker. Derive it from the WiFi MAC.
+    let embassy_net::HardwareAddress::Ethernet(mac) = stack.hardware_address();
+    let mac = mac.0;
+    let mut client_id: heapless::String<40> = heapless::String::new();
+    let _ = write!(
+        client_id,
+        "garagelight-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+
     let mut session = Session::new(
         ConfigBuilder::new(Buffers::new(&mut rx, &mut tx))
-            .client_id(CLIENT_ID)
+            .client_id(client_id.as_str())
             .unwrap()
             .keepalive_interval(KEEPALIVE_SECS),
     );

@@ -1123,13 +1123,57 @@ fn apply_update_truncated_body_is_too_short_and_does_not_mark() {
 }
 
 #[test]
-fn apply_update_overlong_body_is_too_long_and_does_not_mark() {
-    let expected = parse_sha256_hex(HELLO_SHA256).unwrap();
+fn apply_update_reads_exactly_content_length_and_does_not_over_read() {
+    // The body has more bytes than content_length; only the first
+    // content_length are read and hashed, never a byte past it.
+    let expected: [u8; 32] = sha2::Sha256::digest(b"hell").into();
     let mut flasher = MockFlasher::default();
     let mut body = SliceReader::new(HELLO);
     let result = pollster::block_on(apply_update(&mut flasher, &mut body, 4, &expected));
-    assert_eq!(result, Err(UpdateError::TooLong));
-    assert_eq!(flasher.marks(), 0);
+    assert_eq!(result, Ok(()));
+    assert_eq!(body.pos, 4, "must not read past content_length");
+    assert_eq!(flasher.writes(), vec![(0, 4)]);
+    assert_eq!(flasher.marks(), 1);
+}
+
+/// Reader that yields `data` then returns an error on the next read, modelling
+/// a server that drops the socket (without a TLS close_notify) after the body.
+struct ErrorAfterReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl BodyReader for ErrorAfterReader<'_> {
+    type Error = ();
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
+        if self.pos >= self.data.len() {
+            return Err(());
+        }
+        let n = (self.data.len() - self.pos).min(buf.len());
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+#[test]
+fn apply_update_ignores_post_body_read_error() {
+    // The reader yields exactly content_length bytes then errors. The error
+    // must not surface: the loop never reads past the body.
+    let expected: [u8; 32] = sha2::Sha256::digest(HELLO).into();
+    let mut flasher = MockFlasher::default();
+    let mut body = ErrorAfterReader {
+        data: HELLO,
+        pos: 0,
+    };
+    let result = pollster::block_on(apply_update(
+        &mut flasher,
+        &mut body,
+        HELLO.len() as u64,
+        &expected,
+    ));
+    assert_eq!(result, Ok(()));
+    assert_eq!(flasher.marks(), 1);
 }
 
 #[test]

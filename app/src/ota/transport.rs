@@ -42,15 +42,19 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// TLS 1.3 handshake deadline.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 /// One read/write deadline; a healthy peer answers well inside this.
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bytes read from the transport while feeding the head parser. Bounds the
 /// body that can be inadvertently over-read into the leftover buffer.
 pub(super) const READ_CHUNK: usize = 256;
-/// TLS record buffer size (read and write halves).
-pub(super) const RECORD_BYTES: usize = 16384;
-/// TCP receive/transmit window.
-pub(super) const TCP_BYTES: usize = 2048;
+/// TLS record buffer size (read and write halves). A TLS 1.3 record can be up
+/// to 2^14 (16384) plaintext plus up to 256 bytes of AEAD/content-type
+/// overhead, so the buffer must be at least 16384 + 256 = 16640; a 16384-byte
+/// buffer fails on a full-size record. 17 KiB leaves margin.
+pub(super) const RECORD_BYTES: usize = 17 * 1024;
+/// TCP receive/transmit window. The window bounds the number of round trips and
+/// therefore the sustained TLS read throughput; 2 KiB stalls a large download.
+pub(super) const TCP_BYTES: usize = 8192;
 
 const AUTH_MAX_BYTES: usize = 192;
 const REQUEST_MAX_BYTES: usize = 512;
@@ -128,7 +132,13 @@ pub(super) async fn open<'a>(
     }
 
     let mut connection = TlsConnection::new(socket, rec_read, rec_write);
-    let config = TlsConfig::new().with_server_name(uri.host);
+    // `TlsConfig::new` already adds the RSA schemes when the `alloc` feature is
+    // compiled in, but state it explicitly: the real endpoint presents a
+    // Let's Encrypt RSA certificate, and RSA-PSS must be advertised or the
+    // handshake fails before any verification runs.
+    let config = TlsConfig::new()
+        .with_server_name(uri.host)
+        .enable_rsa_signatures();
     let provider = NoVerifyProvider {
         rng: embassy_rp::clocks::RoscRng,
     };

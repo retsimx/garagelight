@@ -14,20 +14,21 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use cyw43::{Control, JoinOptions, NetDriver};
+use cyw43::{JoinOptions, NetDriver};
 use embassy_executor::Spawner;
 use embassy_net::{Config, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
+use crate::beacon::SharedControl;
 use crate::{logln, secrets};
 
 /// DHCP acquisition deadline before the supervisor leaves and retries.
 const DHCP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Reconnect backoff: 1s, doubling to a 60s ceiling, reset on every association.
-const BACKOFF_INITIAL_SECS: u64 = 1;
-const BACKOFF_MAX_SECS: u64 = 60;
+const BACKOFF_INITIAL_SECS: u64 = 30;
+const BACKOFF_MAX_SECS: u64 = 120;
 
 const NET_SEED: u64 = 0x1234_5678_9abc_def0;
 
@@ -41,12 +42,12 @@ pub fn associated() -> bool {
 }
 
 /// Build the stack, spawn the runner and the supervisor, and return the `Copy`
-/// network handle for consumers (MQTT/OTA) to pass to their own tasks. Takes
-/// ownership of the cyw43 control channel so the join future cannot block the
-/// control path.
+/// network handle for consumers (MQTT/OTA) to pass to their own tasks. Takes a
+/// shared handle to the cyw43 control channel so the join future cannot block
+/// the control path and other tasks (the OTA LED beacon) can share it.
 pub fn spawn(
     spawner: Spawner,
-    control: Control<'static>,
+    control: &'static SharedControl,
     net_device: NetDriver<'static>,
 ) -> Stack<'static> {
     // Four concurrent sockets: embassy-net's permanent DNS socket, the DHCP
@@ -71,18 +72,23 @@ async fn runner_task(mut runner: Runner<'static, NetDriver<'static>>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn supervisor_task(mut control: Control<'static>, stack: Stack<'static>) -> ! {
+async fn supervisor_task(control: &'static SharedControl, stack: Stack<'static>) -> ! {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
     loop {
         ASSOCIATED.store(false, Ordering::Relaxed);
         logln!("wifi_associating ssid={}", secrets::WIFI_SSID);
-        match control
-            .join(
+        let joined = {
+            // Hold the lock only while driving the control channel; the long
+            // link/DHCP waits run with the lock released so the OTA LED beacon
+            // can share the channel.
+            let mut c = control.lock().await;
+            c.join(
                 secrets::WIFI_SSID,
                 JoinOptions::new(secrets::WIFI_PASSWORD.as_bytes()),
             )
             .await
-        {
+        };
+        match joined {
             Ok(()) => {
                 logln!("wifi_associated ssid={}", secrets::WIFI_SSID);
                 backoff_secs = BACKOFF_INITIAL_SECS;
@@ -99,7 +105,10 @@ async fn supervisor_task(mut control: Control<'static>, stack: Stack<'static>) -
                     }
                     Err(_) => {
                         logln!("wifi_dhcp_timeout");
-                        control.leave().await;
+                        {
+                            let mut c = control.lock().await;
+                            c.leave().await;
+                        }
                         logln!("wifi_left");
                     }
                 }

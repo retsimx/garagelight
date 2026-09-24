@@ -13,8 +13,8 @@ pub const BROKER_PORT: u16 = 1883;
 pub const KEEPALIVE_SECS: u16 = 60;
 pub const RESET_TOPIC: &str = "garagelight/reset";
 /// Upper bound for the largest sample payload
-/// (`{"temp": -128, "humidity": 255}`, 31 bytes).
-pub const MAX_SAMPLE_PAYLOAD: usize = 32;
+/// (`{"temp": -128, "humidity": 255, "version": 4294967295}`, 54 bytes).
+pub const MAX_SAMPLE_PAYLOAD: usize = 54;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Inbound {
@@ -52,15 +52,17 @@ impl Write for SliceWriter<'_> {
     }
 }
 
-/// Write `{"temp": <t>, "humidity": <h>}` with the exact default separators
-/// Python's `json.dumps` emits. Returns the byte length, or `None` if `out` is
-/// too small. Never panics and never writes out of bounds.
-pub fn encode_sample(sample: Sample, out: &mut [u8]) -> Option<usize> {
+/// Write `{"temp": <t>, "humidity": <h>, "version": <v>}` with the exact
+/// default separators Python's `json.dumps` emits. Returns the byte length,
+/// or `None` if `out` is too small. Never panics and never writes out of
+/// bounds. The firmware version is passed in (keeps this pure and free of app
+/// identity).
+pub fn encode_sample(sample: Sample, version: u32, out: &mut [u8]) -> Option<usize> {
     let mut writer = SliceWriter { buf: out, len: 0 };
     write!(
         writer,
-        "{{\"temp\": {}, \"humidity\": {}}}",
-        sample.temperature, sample.relative_humidity
+        "{{\"temp\": {}, \"humidity\": {}, \"version\": {}}}",
+        sample.temperature, sample.relative_humidity, version
     )
     .ok()?;
     Some(writer.len)

@@ -7,6 +7,7 @@ pub mod layout;
 pub mod ota;
 pub mod sensor;
 pub mod telemetry;
+pub mod wifi;
 
 #[cfg(test)]
 mod tests;
@@ -40,3 +41,4 @@ pub use telemetry::{
     classify_inbound, encode_sample, parse_broker, Inbound, BROKER_PORT, CLIENT_ID, KEEPALIVE_SECS,
     MAX_SAMPLE_PAYLOAD, RESET_TOPIC,
 };
+pub use wifi::{NoIpWatchdog, RejoinCounter, JOIN_TIMEOUT, NO_IP_RESET, REJOIN_AFTER_FAILURES};

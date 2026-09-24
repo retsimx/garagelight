@@ -18,7 +18,7 @@
 //!   corruption.
 //! - `TX_BYTES = 512` holds the CONNECT workspace (~50 B) + the retained
 //!   SUBSCRIBE (~25 B) + the QoS-0 publish scratch (`MAX_FIXED_HEADER_SIZE` +
-//!   topic + 32-byte payload ~= 60 B) + reconnect headroom. QoS 0 carries no
+//!   topic + 54-byte payload ~= 82 B) + reconnect headroom. QoS 0 carries no
 //!   replay state, but the SUBSCRIBE is retained until SUBACK; 512 is ~4x the
 //!   worst-case single encode.
 
@@ -35,6 +35,7 @@ use garagelight_core::contract::MQTT_TOPIC;
 use garagelight_core::telemetry::{
     self, classify_inbound, encode_sample, Inbound, KEEPALIVE_SECS, MAX_SAMPLE_PAYLOAD, RESET_TOPIC,
 };
+use garagelight_core::wifi::RejoinCounter;
 
 use crate::{logln, secrets, sensors, update};
 
@@ -97,12 +98,26 @@ async fn telemetry_task(stack: Stack<'static>) -> ! {
     );
 
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
+    let mut rejoin_counter = RejoinCounter::new();
     loop {
         // Wait for DHCP before spending a connect attempt on an unconfigured link.
         stack.wait_config_up().await;
         match connect_and_run(&mut session, stack).await {
-            Ok(()) => backoff_secs = BACKOFF_INITIAL_SECS,
-            Err(reason) => logln!("mqtt_session_end err={}", reason),
+            Ok(()) => {
+                backoff_secs = BACKOFF_INITIAL_SECS;
+                rejoin_counter.reset();
+            }
+            Err(reason) => {
+                logln!("mqtt_session_end err={}", reason);
+                // Repeated connect failures can mean a dead-but-associated link
+                // that link state alone never reports; ask the net supervisor
+                // to rejoin.
+                if rejoin_counter.record_failure() {
+                    crate::net::request_rejoin();
+                    logln!("mqtt_rejoin_requested");
+                    rejoin_counter.reset();
+                }
+            }
         }
         logln!("mqtt_retry_in_s={}", backoff_secs);
         Timer::after(Duration::from_secs(backoff_secs)).await;
@@ -228,7 +243,7 @@ async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result
         if sensors::sample_pending() {
             let sample = sensors::wait_sample().await;
             let mut payload = [0u8; MAX_SAMPLE_PAYLOAD];
-            let len = encode_sample(sample, &mut payload).ok_or_else(|| {
+            let len = encode_sample(sample, crate::VERSION, &mut payload).ok_or_else(|| {
                 logln!("mqtt_encode_failed");
                 "encode_failed"
             })?;

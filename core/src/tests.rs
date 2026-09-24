@@ -31,6 +31,7 @@ use crate::sensor::{
 use crate::telemetry::{
     classify_inbound, encode_sample, parse_broker, Inbound, MAX_SAMPLE_PAYLOAD,
 };
+use crate::wifi::{NoIpWatchdog, RejoinCounter, NO_IP_RESET, REJOIN_AFTER_FAILURES};
 
 #[derive(Deserialize)]
 struct ContractFile {
@@ -560,47 +561,53 @@ fn sensor_negative_temperature_round_trips() {
 
 #[test]
 fn telemetry_encode_sample_exact_bytes() {
-    let cases: [(Sample, &[u8]); 5] = [
+    let cases: [(Sample, u32, &[u8]); 5] = [
         (
             Sample {
                 temperature: 25,
                 relative_humidity: 60,
             },
-            b"{\"temp\": 25, \"humidity\": 60}",
+            8,
+            b"{\"temp\": 25, \"humidity\": 60, \"version\": 8}",
         ),
         (
             Sample {
                 temperature: -5,
                 relative_humidity: 40,
             },
-            b"{\"temp\": -5, \"humidity\": 40}",
+            8,
+            b"{\"temp\": -5, \"humidity\": 40, \"version\": 8}",
         ),
         (
             Sample {
                 temperature: 25,
                 relative_humidity: 0,
             },
-            b"{\"temp\": 25, \"humidity\": 0}",
+            0,
+            b"{\"temp\": 25, \"humidity\": 0, \"version\": 0}",
         ),
         (
             Sample {
                 temperature: 25,
                 relative_humidity: 100,
             },
-            b"{\"temp\": 25, \"humidity\": 100}",
+            8,
+            b"{\"temp\": 25, \"humidity\": 100, \"version\": 8}",
         ),
         (
             Sample {
                 temperature: 0,
                 relative_humidity: 0,
             },
-            b"{\"temp\": 0, \"humidity\": 0}",
+            8,
+            b"{\"temp\": 0, \"humidity\": 0, \"version\": 8}",
         ),
     ];
 
-    for (sample, expected) in cases {
+    for (sample, version, expected) in cases {
         let mut out = [0u8; MAX_SAMPLE_PAYLOAD];
-        let len = encode_sample(sample, &mut out).expect("sample fits in MAX_SAMPLE_PAYLOAD");
+        let len =
+            encode_sample(sample, version, &mut out).expect("sample fits in MAX_SAMPLE_PAYLOAD");
         assert_eq!(len, expected.len(), "length for {sample:?}");
         assert_eq!(&out[..len], expected, "bytes for {sample:?}");
     }
@@ -613,12 +620,12 @@ fn telemetry_encode_sample_exact_buffer_and_one_byte_short() {
         relative_humidity: 60,
     };
     let mut scratch = [0u8; MAX_SAMPLE_PAYLOAD];
-    let len = encode_sample(sample, &mut scratch).expect("sample fits");
+    let len = encode_sample(sample, 8, &mut scratch).expect("sample fits");
 
     let mut short = [0u8; MAX_SAMPLE_PAYLOAD];
-    assert_eq!(encode_sample(sample, &mut short[..len - 1]), None);
-    assert_eq!(encode_sample(sample, &mut short[..len]), Some(len));
-    assert_eq!(encode_sample(sample, &mut []), None);
+    assert_eq!(encode_sample(sample, 8, &mut short[..len - 1]), None);
+    assert_eq!(encode_sample(sample, 8, &mut short[..len]), Some(len));
+    assert_eq!(encode_sample(sample, 8, &mut []), None);
 }
 
 #[test]
@@ -676,8 +683,13 @@ fn telemetry_max_sample_payload_holds_widest_sample() {
         relative_humidity: 255,
     };
     let mut out = [0u8; MAX_SAMPLE_PAYLOAD];
-    let len = encode_sample(widest, &mut out).expect("widest sample fits in MAX_SAMPLE_PAYLOAD");
-    assert_eq!(&out[..len], b"{\"temp\": -128, \"humidity\": 255}");
+    let len = encode_sample(widest, u32::MAX, &mut out)
+        .expect("widest sample fits in MAX_SAMPLE_PAYLOAD");
+    assert_eq!(
+        &out[..len],
+        b"{\"temp\": -128, \"humidity\": 255, \"version\": 4294967295}"
+    );
+    assert_eq!(len, MAX_SAMPLE_PAYLOAD);
     assert!(len <= MAX_SAMPLE_PAYLOAD);
 }
 #[test]
@@ -1307,4 +1319,70 @@ fn self_test_reverts_when_only_one_mandatory_holds() {
     let mut clock = VirtualClock::new();
     let report = pollster::block_on(self_test(&mut ble_only, &mut clock));
     assert_eq!(report.verdict, Verdict::Revert);
+}
+
+#[test]
+fn no_ip_watchdog_not_due_below_threshold() {
+    let mut wd = NoIpWatchdog::new();
+    wd.record(NO_IP_RESET - core::time::Duration::from_secs(1));
+    assert!(!wd.is_reset_due());
+}
+
+#[test]
+fn no_ip_watchdog_due_at_threshold() {
+    let mut wd = NoIpWatchdog::new();
+    wd.record(NO_IP_RESET);
+    assert!(wd.is_reset_due());
+}
+
+#[test]
+fn no_ip_watchdog_due_above_threshold() {
+    let mut wd = NoIpWatchdog::new();
+    wd.record(NO_IP_RESET + core::time::Duration::from_secs(10));
+    assert!(wd.is_reset_due());
+}
+
+#[test]
+fn no_ip_watchdog_reset_rearms() {
+    let mut wd = NoIpWatchdog::new();
+    wd.record(NO_IP_RESET);
+    assert!(wd.is_reset_due());
+    wd.reset();
+    assert!(!wd.is_reset_due());
+}
+
+#[test]
+fn rejoin_not_due_below_threshold() {
+    let mut counter = RejoinCounter::new();
+    for _ in 0..REJOIN_AFTER_FAILURES - 1 {
+        assert!(!counter.record_failure());
+    }
+}
+
+#[test]
+fn rejoin_due_at_threshold() {
+    let mut counter = RejoinCounter::new();
+    for _ in 0..REJOIN_AFTER_FAILURES {
+        counter.record_failure();
+    }
+    assert!(counter.record_failure());
+}
+
+#[test]
+fn rejoin_reset_after_rejoin() {
+    let mut counter = RejoinCounter::new();
+    for _ in 0..REJOIN_AFTER_FAILURES {
+        counter.record_failure();
+    }
+    counter.reset();
+    assert!(!counter.record_failure());
+}
+
+#[test]
+fn rejoin_reset_on_clean_connect() {
+    let mut counter = RejoinCounter::new();
+    counter.record_failure();
+    counter.record_failure();
+    counter.reset();
+    assert!(!counter.record_failure());
 }

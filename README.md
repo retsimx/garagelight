@@ -141,8 +141,10 @@ target, so the equivalent shorthand works:
 cargo run --release -p garagelight-app
 ```
 
-The app logs over **UART0 (GP0 TX) at 115200** and defmt/RTT: version, reset reason and
-the four blob sizes. The `radio_smoke` bench binary runs the same way.
+The app logs over **UART0 (GP0 TX) at 115200** and defmt/RTT: version, hardware
+`reset_reason`, persistent software `reboot_reason` (preserved across the bootloader in
+`WATCHDOG_SCRATCH0`), and the four blob sizes. The `radio_smoke` bench binary runs the same
+way.
 
 ### A/B update lifecycle
 
@@ -433,18 +435,30 @@ fault indication.
 - **Polarity unverified** — `LAMP_ON_LEVEL` (`true`, active-high) is a single constant; no
   lamp is attached to the prototype, so the wiring polarity is confirmed at cutover.
 
-### WiFi station and DNS
+### WiFi station, DNS, and health supervision
 
-The network supervisor joins the AP and reconnects it as needed. `embassy-net` is built
-**without the `dns` feature**, so the configured `MQTT_BROKER` is an **IP literal**, not a
-hostname. The OTA transport enables `dns` and resolves `OTA_URL` when it names a host; an
-IPv4 literal is still accepted and skips DNS. `MQTT_BROKER` remains an IP literal.
+The network supervisor joins the AP and reconnects it as needed; 3 consecutive MQTT
+connect/session failures wake the supervisor via `net::request_rejoin()` to leave and
+immediately rejoin on dead-but-associated links. `embassy-net` is built **without the
+`dns` feature**, so the configured `MQTT_BROKER` is an **IP literal**, not a hostname. The
+OTA transport enables `dns` and resolves `OTA_URL` when it names a host; an IPv4 literal
+is still accepted and skips DNS. `MQTT_BROKER` remains an IP literal.
+
+`watchdog_task` (`app/src/main.rs`) feeds the 8 s hardware watchdog every 100 ms and
+evaluates `garagelight_core::HealthMonitor` (`core/src/health.rs`) every ~1 s. A full
+RP2040 chip reset (`Watchdog::trigger_reset()`, recording `RebootReason` in
+`WATCHDOG_SCRATCH0`) is triggered on a boot init timeout (`60 s`), continuous BLE
+controller/advertise error (`60 s`; idle advertising never triggers), core1 sensor loop
+stall (`120 s`), or sustained no-IP / MQTT outage (`600 s`), and is suppressed while an
+OTA flash write is in progress.
 
 ### MQTT telemetry
 
 The telemetry task publishes the DHT11 sample to the configured broker and subscribes to a
 reset topic. `app/src/telemetry.rs` runs one task on core0, spawned after `net::spawn`
-(app/src/main.rs), so telemetry is best-effort and never resets the device.
+(app/src/main.rs). Transient broker or WiFi outages retry in the background without
+resetting, while a sustained `600 s` outage without confirmed MQTT liveness triggers a
+bounded watchdog reset.
 
 - **Session** — a per-device client id derived from the WiFi MAC, keepalive 60 s
   (`core/src/telemetry.rs`), no last-will, no auth and no TLS.
@@ -454,16 +468,19 @@ reset topic. `app/src/telemetry.rs` runs one task on core0, spawned after `net::
   `mqtt://IP:1883`, `IP:1883`, or a plain `IP`. Hostnames are rejected because the firmware
   has no DNS; the example value is `mqtt://CHANGE_ME:1883`.
 - **Publish** — topic `garage/temperature` (from `contract.toml` via
-  `core/src/contract.rs`), payload `{"temp": <int>, "humidity": <int>}`
+  `core/src/contract.rs`), payload `{"temp": <int>, "humidity": <int>, "version": <int>}`
   (`core/src/telemetry.rs`), **QoS 0**, published once per fresh DHT11 sample (every
   15 s; `core/src/sensor.rs`). A failed sensor read signals nothing and is not published.
 - **Subscribe** — `garagelight/reset` (`core/src/telemetry.rs`); any message on that
-  exact topic logs `mqtt_reset_received` and calls the `update::request_check()` OTA-check
-  entry point, currently a log-only stub (`app/src/update.rs`).
-- **Reconnect** — application-supervised: each attempt opens a fresh `TcpSocket` and session
-  handshake, then backs off 1 s doubling to a 60 s ceiling (`app/src/telemetry.rs`). A
+  exact topic logs `mqtt_reset_received` and calls `update::request_check()`
+  (`app/src/update.rs`), which logs `ota_check_requested` and triggers an OTA check via
+  `ota::trigger()`.
+- **Reconnect** — application-supervised: each attempt opens a fresh `TcpSocket` (with
+  15 s TCP keepalive and 45 s TCP timeout), bounds `subscribe`/`publish` with 10 s async
+  timeouts, and backs off 1 s doubling to a 60 s ceiling (`app/src/telemetry.rs`). A
   fresh `Connected` broker session re-subscribes; a resumed `Reconnected` session keeps the
-  broker-side subscription. A broker restart resumes with no device reboot.
+  broker-side subscription. A transient broker restart resumes with no device reboot; 3
+  consecutive failures request an immediate WiFi rejoin.
 - **Buffers** — `rx = 256` holds the largest inbound packet (a `garagelight/reset` publish);
   `tx = 512` holds the CONNECT workspace plus the retained SUBSCRIBE plus a QoS-0 encode and
   reconnect headroom; TCP rx/tx are 512 each (`app/src/telemetry.rs`). `minimq` is

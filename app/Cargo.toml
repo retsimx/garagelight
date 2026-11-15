@@ -48,6 +48,7 @@ embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driv
 embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-futures = { version = "0.1", default-features = false }
 embassy-net = { workspace = true, features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet", "dns"] }
 cyw43 = { workspace = true, features = ["defmt", "bluetooth", "firmware-logs"] }
 cyw43-pio = { workspace = true, features = ["defmt"] }

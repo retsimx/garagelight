@@ -7,10 +7,11 @@ use panic_probe as _;
 use embassy_executor::Spawner;
 use embassy_rp::uart;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use garagelight_app::radio::{self, RadioPeripherals};
 use garagelight_app::{
-    ble, blobs, highpri, lamp, logging, logln, net, ota, selftest, sensors, telemetry, update,
+    ble, blobs, health, highpri, lamp, logging, logln, net, ota, selftest, sensors, telemetry,
+    update,
 };
 
 #[embassy_executor::main]
@@ -30,9 +31,12 @@ async fn main(spawner: Spawner) {
         Some(ResetReason::TimedOut) => "watchdog-timeout",
         None => "power-on-or-debugger",
     };
+    let sw_reason = garagelight_core::decode_scratch(wd.get_scratch(0));
+    wd.set_scratch(0, 0);
 
     logln!("garagelight version={}", garagelight_app::VERSION);
     logln!("reset_reason={}", reset_reason);
+    logln!("reboot_reason={}", sw_reason.map_or("none", |r| r.as_str()));
 
     let wifi = core::hint::black_box(blobs::WIFI_FW).len();
     let bt = core::hint::black_box(blobs::BT_FW).len();
@@ -116,6 +120,7 @@ async fn main(spawner: Spawner) {
     logln!("net supervisor spawned");
     telemetry::spawn(spawner, stack);
     logln!("mqtt telemetry spawned");
+    health::mark_boot_ready();
 
     let mut updater = update::Updater::new(p.FLASH);
     selftest::run(&mut updater).await;
@@ -130,8 +135,19 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn watchdog_task() -> ! {
+    let mut monitor = garagelight_core::HealthMonitor::new();
+    let mut ticks: u8 = 0;
     loop {
         update::feed(update::WATCHDOG_TIMEOUT);
+        ticks = ticks.wrapping_add(1);
+        if ticks >= 10 {
+            ticks = 0;
+            let now_ms = Instant::now().as_millis();
+            if let Some(reason) = monitor.evaluate(now_ms, health::snapshot()) {
+                logln!("health_reboot reason={}", reason.as_str());
+                update::reboot(reason);
+            }
+        }
         Timer::after(Duration::from_millis(100)).await;
     }
 }

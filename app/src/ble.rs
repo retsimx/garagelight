@@ -43,6 +43,7 @@ async fn host_runner_task(stack: &'static Stack<'static, BleController, DefaultP
     let mut runner = stack.runner();
     loop {
         if runner.run().await.is_err() {
+            crate::health::set_ble_healthy(false);
             logln!("ble_runner_err");
             Timer::after(Duration::from_millis(1000)).await;
         }
@@ -51,6 +52,14 @@ async fn host_runner_task(stack: &'static Stack<'static, BleController, DefaultP
 
 #[embassy_executor::task]
 async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPacketPool>) {
+    struct BleExitGuard;
+    impl Drop for BleExitGuard {
+        fn drop(&mut self) {
+            crate::health::set_ble_healthy(false);
+        }
+    }
+    let _exit_guard = BleExitGuard;
+
     let server: Server<'static> =
         match Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
             name: "glgt",
@@ -107,10 +116,12 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
         let acceptor = match peripheral.advertise(&params, advertisement).await {
             Ok(acceptor) => {
                 ADVERTISING.store(true, Ordering::Relaxed);
+                crate::health::set_ble_healthy(true);
                 logln!("ble_advertising");
                 acceptor
             }
             Err(_) => {
+                crate::health::set_ble_healthy(false);
                 logln!("ble_advertise_err");
                 Timer::after(Duration::from_millis(500)).await;
                 continue;
@@ -118,7 +129,10 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
         };
 
         let conn = match acceptor.accept().await {
-            Ok(conn) => conn,
+            Ok(conn) => {
+                crate::health::set_ble_healthy(true);
+                conn
+            }
             Err(_) => {
                 logln!("ble_advertise_stopped");
                 crate::lamp::post(LampEvent::LinkDown);
@@ -128,6 +142,7 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
 
         let conn = match conn.with_attribute_server(&server) {
             Ok(conn) => {
+                crate::health::set_ble_healthy(true);
                 logln!("ble_connected");
                 conn
             }

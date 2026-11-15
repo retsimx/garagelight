@@ -4,7 +4,8 @@
 //! Each reconnect attempt opens a fresh [`TcpSocket`] and a fresh `Connection`;
 //! the `Session` and its task-local packet buffers survive broker restarts, so
 //! a deploy never needs a device reboot. Telemetry is best-effort: it is spawned
-//! after the control path and WiFi, and it never resets the device.
+//! after the control path and WiFi, and never resets the device directly
+//! (sustained outages are supervised centrally by [`crate::health`]).
 //!
 //! # Buffer sizing (design 010 section 4.4)
 //!
@@ -46,7 +47,11 @@ const TCP_TX_BYTES: usize = 512;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_KEEPALIVE: Duration = Duration::from_secs(15);
+const TCP_TIMEOUT: Duration = Duration::from_secs(45);
 const TICK: Duration = Duration::from_secs(1);
+const HEARTBEAT_POLL_TICKS: u32 = 60;
 
 /// Bound on polls spent waiting for the SUBSCRIBE `Op` to complete.
 const SUBSCRIBE_POLL_LIMIT: u32 = 8;
@@ -102,22 +107,23 @@ async fn telemetry_task(stack: Stack<'static>) -> ! {
     loop {
         // Wait for DHCP before spending a connect attempt on an unconfigured link.
         stack.wait_config_up().await;
-        match connect_and_run(&mut session, stack).await {
-            Ok(()) => {
-                backoff_secs = BACKOFF_INITIAL_SECS;
-                rejoin_counter.reset();
-            }
+        let healthy = match connect_and_run(&mut session, stack).await {
+            Ok(healthy) => healthy,
             Err(reason) => {
                 logln!("mqtt_session_end err={}", reason);
-                // Repeated connect failures can mean a dead-but-associated link
-                // that link state alone never reports; ask the net supervisor
-                // to rejoin.
-                if rejoin_counter.record_failure() {
-                    crate::net::request_rejoin();
-                    logln!("mqtt_rejoin_requested");
-                    rejoin_counter.reset();
-                }
+                false
             }
+        };
+        if healthy {
+            backoff_secs = BACKOFF_INITIAL_SECS;
+            rejoin_counter.reset();
+        } else if rejoin_counter.record_failure() {
+            // Repeated connect failures (including immediate post-CONNACK
+            // disconnects) can mean a dead-but-associated link that link state
+            // alone never reports; ask the net supervisor to rejoin.
+            crate::net::request_rejoin();
+            logln!("mqtt_rejoin_requested");
+            rejoin_counter.reset();
         }
         logln!("mqtt_retry_in_s={}", backoff_secs);
         Timer::after(Duration::from_secs(backoff_secs)).await;
@@ -125,13 +131,22 @@ async fn telemetry_task(stack: Stack<'static>) -> ! {
     }
 }
 
+/// Record confirmed MQTT liveness and reset the idle poll tick counter.
+fn record_mqtt_liveness(session_healthy: &mut bool, poll_ticks: &mut u32) {
+    crate::health::heartbeat_mqtt();
+    *session_healthy = true;
+    *poll_ticks = 0;
+}
+
 /// Open one TCP connection, handshake, subscribe (on a fresh session) and drive
-/// the poll/publish loop until the connection ends. The `Session` is borrowed,
-/// so it persists across attempts.
+/// the poll/publish loop until the connection ends. Returns `Ok(true)` if the
+/// session proved healthy via at least one MQTT heartbeat before disconnecting,
+/// or `Ok(false)` if it disconnected before any progress. The `Session` is
+/// borrowed, so it persists across attempts.
 async fn connect_and_run(
     session: &mut Session<'_>,
     stack: Stack<'static>,
-) -> Result<(), SessionEnd> {
+) -> Result<bool, SessionEnd> {
     CONNECTED.store(false, Ordering::Relaxed);
     let result = run_session(session, stack).await;
     CONNECTED.store(false, Ordering::Relaxed);
@@ -139,7 +154,7 @@ async fn connect_and_run(
 }
 
 /// One session attempt; see [`connect_and_run`].
-async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result<(), SessionEnd> {
+async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result<bool, SessionEnd> {
     let (addr, port) = telemetry::parse_broker(secrets::MQTT_BROKER).ok_or_else(|| {
         logln!("mqtt_broker_invalid");
         "broker_invalid"
@@ -148,6 +163,8 @@ async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result
     let mut tcp_rx = [0u8; TCP_RX_BYTES];
     let mut tcp_tx = [0u8; TCP_TX_BYTES];
     let mut socket = TcpSocket::new(stack, &mut tcp_rx, &mut tcp_tx);
+    socket.set_keep_alive(Some(TCP_KEEPALIVE));
+    socket.set_timeout(Some(TCP_TIMEOUT));
     let endpoint = IpEndpoint::new(IpAddress::Ipv4(addr), port);
 
     match with_timeout(CONNECT_TIMEOUT, socket.connect(endpoint)).await {
@@ -179,10 +196,17 @@ async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result
         ConnectEvent::Connected => {
             CONNECTED.store(true, Ordering::Relaxed);
             let filters = [TopicFilter::new(RESET_TOPIC)];
-            let op = conn.subscribe(&filters, &[]).await.map_err(|_| {
-                logln!("mqtt_subscribe_failed");
-                "subscribe_failed"
-            })?;
+            let op = match with_timeout(IO_TIMEOUT, conn.subscribe(&filters, &[])).await {
+                Ok(Ok(op)) => op,
+                Ok(Err(_)) => {
+                    logln!("mqtt_subscribe_failed");
+                    return Err("subscribe_failed");
+                }
+                Err(_) => {
+                    logln!("mqtt_subscribe_timeout");
+                    return Err("subscribe_timeout");
+                }
+            };
             // Drive the SUBACK to completion before entering the steady-state
             // loop. Bounded so a silent broker cannot stall the task.
             let mut polls = 0;
@@ -194,7 +218,7 @@ async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result
                     Ok(Ok(_)) => {}
                     Ok(Err(minimq::Error::Disconnected)) => {
                         logln!("mqtt_disconnected");
-                        return Ok(());
+                        return Ok(false);
                     }
                     Ok(Err(_)) => {
                         logln!("mqtt_error");
@@ -217,25 +241,37 @@ async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result
         }
     }
 
+    let mut session_healthy = false;
+    let mut poll_ticks: u32 = 0;
     loop {
         match with_timeout(TICK, conn.poll()).await {
-            Ok(Ok(Some(msg))) => match classify_inbound(msg.topic()) {
-                Inbound::RequestUpdate => {
-                    logln!("mqtt_reset_received payload_len={}", msg.payload().len());
-                    update::request_check();
+            Ok(Ok(Some(msg))) => {
+                record_mqtt_liveness(&mut session_healthy, &mut poll_ticks);
+                match classify_inbound(msg.topic()) {
+                    Inbound::RequestUpdate => {
+                        logln!("mqtt_reset_received payload_len={}", msg.payload().len());
+                        update::request_check();
+                    }
+                    Inbound::Ignore => logln!("mqtt_unknown_topic topic={}", msg.topic()),
                 }
-                Inbound::Ignore => logln!("mqtt_unknown_topic topic={}", msg.topic()),
-            },
-            Ok(Ok(None)) => {}
+            }
+            Ok(Ok(None)) => {
+                record_mqtt_liveness(&mut session_healthy, &mut poll_ticks);
+            }
             Ok(Err(minimq::Error::Disconnected)) => {
                 logln!("mqtt_disconnected");
-                return Ok(());
+                return Ok(session_healthy);
             }
             Ok(Err(_)) => {
                 logln!("mqtt_error");
                 return Err("poll");
             }
-            Err(_) => {}
+            Err(_) => {
+                poll_ticks = poll_ticks.saturating_add(1);
+                if poll_ticks >= HEARTBEAT_POLL_TICKS {
+                    record_mqtt_liveness(&mut session_healthy, &mut poll_ticks);
+                }
+            }
         }
 
         // Publish only when a fresh sample is waiting; a failed DHT read
@@ -248,15 +284,21 @@ async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result
                 "encode_failed"
             })?;
             let publication = Publication::new(MQTT_TOPIC, &payload[..len]).qos(QoS::AtMostOnce);
-            match conn.publish(publication).await {
-                Ok(_) => {}
-                Err(minimq::PubError::Session(minimq::Error::Disconnected)) => {
-                    logln!("mqtt_disconnected");
-                    return Ok(());
+            match with_timeout(IO_TIMEOUT, conn.publish(publication)).await {
+                Ok(Ok(_)) => {
+                    record_mqtt_liveness(&mut session_healthy, &mut poll_ticks);
                 }
-                Err(_) => {
+                Ok(Err(minimq::PubError::Session(minimq::Error::Disconnected))) => {
+                    logln!("mqtt_disconnected");
+                    return Ok(session_healthy);
+                }
+                Ok(Err(_)) => {
                     logln!("mqtt_publish_failed");
                     return Err("publish");
+                }
+                Err(_) => {
+                    logln!("mqtt_publish_timeout");
+                    return Err("publish_timeout");
                 }
             }
         }

@@ -1264,6 +1264,7 @@ dependencies = [
  "embassy-boot",
  "embassy-embedded-hal 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embassy-executor",
+ "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "embassy-net",
  "embassy-rp",
  "embassy-sync",

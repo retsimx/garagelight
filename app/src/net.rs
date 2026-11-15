@@ -17,7 +17,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use cyw43::{JoinOptions, NetDriver};
+use cyw43::{JoinAuth, JoinOptions, NetDriver};
 use embassy_executor::Spawner;
 use embassy_net::{Config, ConfigV4, DhcpConfig, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
@@ -68,6 +68,70 @@ fn clear_rejoin_requested() {
     REJOIN_REQUESTED.store(false, Ordering::Relaxed);
 }
 
+/// Why one join attempt did not succeed.
+enum JoinAttemptError {
+    /// The join call did not complete within [`JOIN_TIMEOUT`].
+    Timeout,
+    /// The radio reported a join failure.
+    Join(cyw43::JoinError),
+}
+
+/// One bounded join attempt with an explicit authentication mode.
+///
+/// `auth` only applies to secured networks: an empty password selects
+/// [`JoinOptions::new_open`], which the driver joins as `JoinAuth::Open`. The
+/// control lock is held only for the call itself, so the OTA LED beacon can
+/// share the channel while the link and DHCP settle.
+async fn join_with(
+    control: &'static SharedControl,
+    auth: JoinAuth,
+) -> Result<(), JoinAttemptError> {
+    let mut c = control.lock().await;
+    let options = if secrets::WIFI_PASSWORD.is_empty() {
+        JoinOptions::new_open()
+    } else {
+        let mut options = JoinOptions::new(secrets::WIFI_PASSWORD.as_bytes());
+        options.auth = auth;
+        options
+    };
+    match embassy_time::with_timeout(
+        Duration::from_secs(JOIN_TIMEOUT.as_secs()),
+        c.join(secrets::WIFI_SSID, options),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(JoinAttemptError::Join(e)),
+        Err(_) => Err(JoinAttemptError::Timeout),
+    }
+}
+
+/// Join the configured network, preferring WPA2-PSK over the driver default.
+///
+/// [`JoinOptions::new`] defaults to `JoinAuth::Wpa2Wpa3`, which sets `AUTH_SAE`.
+/// The CYW43439 firmware drops a WPA3 (SAE) association every ~11 hours and
+/// then re-associates on its own, so every drop costs a rejoin; see
+/// `georgerobotics/cyw43-driver#161` and the Infineon report it cites. Trying
+/// `Wpa2` first keeps an AP that still offers WPA2-PSK off the SAE path.
+///
+/// The WPA2/WPA3 default is retried once if WPA2 fails (error or timeout) and a
+/// password is configured, so an AP that no longer advertises WPA2-PSK (WPA3
+/// only) still associates, at the cost of one extra failed attempt per
+/// reconnect on such a network. Open networks are unaffected: they join with
+/// [`JoinOptions::new_open`] and get no fallback attempt.
+async fn attempt_join(control: &'static SharedControl) -> Result<(), JoinAttemptError> {
+    let wpa2 = join_with(control, JoinAuth::Wpa2).await;
+    if wpa2.is_ok() || secrets::WIFI_PASSWORD.is_empty() {
+        return wpa2;
+    }
+
+    logln!("wifi_wpa2_join_failed retrying=wpa2wpa3");
+    // No `leave()` here: `Control::join()` re-issues the full security
+    // configuration, the timed-out attempt's future and lock guard are dropped
+    // together, and the supervisor leaves on its next iteration.
+    join_with(control, JoinAuth::Wpa2Wpa3).await
+}
+
 /// Build the stack, spawn the runner and the supervisor, and return the `Copy`
 /// network handle for consumers (MQTT/OTA) to pass to their own tasks. Takes a
 /// shared handle to the cyw43 control channel so the join future cannot block
@@ -116,25 +180,15 @@ async fn supervisor_task(control: &'static SharedControl, stack: Stack<'static>)
         ASSOCIATED.store(false, Ordering::Relaxed);
         logln!("wifi_associating ssid={}", secrets::WIFI_SSID);
         let joined = {
-            // Hold the lock only while driving the control channel; the long
-            // link/DHCP waits run with the lock released so the OTA LED beacon
-            // can share the channel.
-            let mut c = control.lock().await;
-            match embassy_time::with_timeout(
-                Duration::from_secs(JOIN_TIMEOUT.as_secs()),
-                c.join(
-                    secrets::WIFI_SSID,
-                    JoinOptions::new(secrets::WIFI_PASSWORD.as_bytes()),
-                ),
-            )
-            .await
-            {
-                Ok(Ok(())) => true,
-                Ok(Err(e)) => {
+            // The join helper takes the control lock only for the join call
+            // itself, so the OTA LED beacon can share the channel.
+            match attempt_join(control).await {
+                Ok(()) => true,
+                Err(JoinAttemptError::Join(e)) => {
                     logln!("wifi_join_failed err={:?}", e);
                     false
                 }
-                Err(_) => {
+                Err(JoinAttemptError::Timeout) => {
                     logln!("wifi_join_timeout");
                     false
                 }

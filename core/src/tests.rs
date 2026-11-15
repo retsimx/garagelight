@@ -11,6 +11,11 @@ use crate::contract::{
     KEEPALIVE_INTERVAL_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID, SERVICE_UUID_BYTES,
     VALUE_LEN_BYTES,
 };
+use crate::health::{
+    decode_scratch, encode_scratch, HealthMonitor, HealthSignals, RebootReason,
+    BLE_ERROR_TIMEOUT_MS, BOOT_TIMEOUT_MS, CORE1_STALL_TIMEOUT_MS, MQTT_OUTAGE_TIMEOUT_MS,
+    NO_IP_RESET_MS,
+};
 use crate::lamp::{
     fault_level, LampEvent, LampMachine, FAULT_CYCLE_MS, FAULT_OFF1_MS, FAULT_OFF2_MS,
     FAULT_ON1_MS, FAULT_ON2_MS,
@@ -1385,4 +1390,345 @@ fn rejoin_reset_on_clean_connect() {
     counter.record_failure();
     counter.reset();
     assert!(!counter.record_failure());
+}
+
+fn healthy_signals(core1_seq: u32, mqtt_seq: u32) -> HealthSignals {
+    HealthSignals {
+        boot_ready: true,
+        core1_seq,
+        ble_healthy: true,
+        wifi_associated: true,
+        mqtt_seq,
+        ota_flashing: false,
+    }
+}
+
+#[test]
+fn scratch_round_trips_all_reasons_and_names() {
+    let cases = [
+        (RebootReason::BootTimeout, "boot-timeout"),
+        (RebootReason::Core1Stall, "core1-stall"),
+        (RebootReason::BleError, "ble-error"),
+        (RebootReason::NoIp, "no-ip"),
+        (RebootReason::MqttOutage, "mqtt-outage"),
+        (RebootReason::OtaSwap, "ota-swap"),
+        (RebootReason::SelftestRevert, "selftest-revert"),
+    ];
+    for (reason, name) in cases {
+        assert_eq!(reason.as_str(), name);
+        let word = encode_scratch(reason);
+        assert_eq!(decode_scratch(word), Some(reason));
+    }
+}
+
+#[test]
+fn scratch_rejects_invalid_words() {
+    assert_eq!(decode_scratch(0), None);
+    assert_eq!(decode_scratch(0xFFFF_FFFF), None);
+
+    // Wrong magic prefix with otherwise valid code+complement for BootTimeout (1).
+    let valid = encode_scratch(RebootReason::BootTimeout);
+    assert_eq!(decode_scratch(valid ^ 0x0001_0000), None);
+    assert_eq!(decode_scratch(0x5AA5_0000 | (valid & 0xFFFF)), None);
+
+    // Corrupted complement byte.
+    assert_eq!(decode_scratch(valid ^ 0x0000_0100), None);
+
+    // Valid magic + valid complement, but invalid/unknown reason codes (0, 8, 255).
+    for bad_code in [0u8, 8u8, 255u8] {
+        let word = 0xA55A_0000 | (((!bad_code) as u32) << 8) | (bad_code as u32);
+        assert_eq!(decode_scratch(word), None);
+    }
+}
+
+#[test]
+fn health_no_ip_constant_matches_wifi_duration() {
+    assert_eq!(NO_IP_RESET.as_millis() as u64, NO_IP_RESET_MS);
+    assert_eq!(NO_IP_RESET_MS, 600_000);
+}
+
+#[test]
+fn health_boot_timeout_and_clear_on_ready() {
+    let mut mon = HealthMonitor::new();
+    let booting = HealthSignals {
+        boot_ready: false,
+        core1_seq: 0,
+        ble_healthy: false,
+        wifi_associated: false,
+        mqtt_seq: 0,
+        ota_flashing: false,
+    };
+    assert_eq!(mon.evaluate(1_000, booting), None);
+    assert_eq!(mon.evaluate(1_000 + BOOT_TIMEOUT_MS - 1, booting), None);
+    assert_eq!(
+        mon.evaluate(1_000 + BOOT_TIMEOUT_MS, booting),
+        Some(RebootReason::BootTimeout)
+    );
+
+    // Clearing boot_ready before deadline disarms boot timeout and anchors post-boot timers.
+    let mut mon2 = HealthMonitor::new();
+    assert_eq!(mon2.evaluate(0, booting), None);
+    assert_eq!(mon2.evaluate(BOOT_TIMEOUT_MS - 1, booting), None);
+    assert_eq!(mon2.evaluate(BOOT_TIMEOUT_MS, healthy_signals(1, 1)), None);
+    assert_eq!(
+        mon2.evaluate(BOOT_TIMEOUT_MS + 10_000, healthy_signals(2, 2)),
+        None
+    );
+}
+
+#[test]
+fn health_core1_stall_and_wraparound() {
+    let mut mon = HealthMonitor::new();
+    assert_eq!(mon.evaluate(10_000, healthy_signals(u32::MAX, 1)), None);
+    assert_eq!(
+        mon.evaluate(
+            10_000 + CORE1_STALL_TIMEOUT_MS - 1,
+            healthy_signals(u32::MAX, 2)
+        ),
+        None
+    );
+    // Advance core1_seq with u32::MAX -> 0 wraparound; timer resets.
+    assert_eq!(
+        mon.evaluate(10_000 + CORE1_STALL_TIMEOUT_MS - 1, healthy_signals(0, 2)),
+        None
+    );
+    let anchor = 10_000 + CORE1_STALL_TIMEOUT_MS - 1;
+    assert_eq!(
+        mon.evaluate(anchor + CORE1_STALL_TIMEOUT_MS - 1, healthy_signals(0, 3)),
+        None
+    );
+    assert_eq!(
+        mon.evaluate(anchor + CORE1_STALL_TIMEOUT_MS, healthy_signals(0, 3)),
+        Some(RebootReason::Core1Stall)
+    );
+}
+
+#[test]
+fn health_ble_error_and_idle_advertising() {
+    let mut mon = HealthMonitor::new();
+    let mut core1 = 1u32;
+    let mut mqtt = 1u32;
+
+    // Idle advertising (ble_healthy = true) never resets over an hour.
+    assert_eq!(mon.evaluate(0, healthy_signals(core1, mqtt)), None);
+    for step in 1..=60 {
+        core1 = core1.wrapping_add(1);
+        mqtt = mqtt.wrapping_add(1);
+        assert_eq!(
+            mon.evaluate(step * 60_000, healthy_signals(core1, mqtt)),
+            None
+        );
+    }
+
+    // Transient BLE error that recovers before BLE_ERROR_TIMEOUT_MS clears.
+    let t0 = 3_600_000;
+    let mut unhealthy = healthy_signals(core1, mqtt);
+    unhealthy.ble_healthy = false;
+    assert_eq!(mon.evaluate(t0, unhealthy), None);
+    assert_eq!(mon.evaluate(t0 + BLE_ERROR_TIMEOUT_MS - 1, unhealthy), None);
+    core1 = core1.wrapping_add(1);
+    mqtt = mqtt.wrapping_add(1);
+    assert_eq!(
+        mon.evaluate(t0 + BLE_ERROR_TIMEOUT_MS - 1, healthy_signals(core1, mqtt)),
+        None
+    );
+
+    // Persistent BLE error trips at BLE_ERROR_TIMEOUT_MS.
+    let t1 = t0 + BLE_ERROR_TIMEOUT_MS;
+    unhealthy.core1_seq = core1;
+    unhealthy.mqtt_seq = mqtt;
+    assert_eq!(mon.evaluate(t1, unhealthy), None);
+    assert_eq!(mon.evaluate(t1 + BLE_ERROR_TIMEOUT_MS - 1, unhealthy), None);
+    assert_eq!(
+        mon.evaluate(t1 + BLE_ERROR_TIMEOUT_MS, unhealthy),
+        Some(RebootReason::BleError)
+    );
+}
+
+#[test]
+fn health_no_ip_and_recovery() {
+    let mut mon = HealthMonitor::new();
+    assert_eq!(mon.evaluate(0, healthy_signals(1, 1)), None);
+
+    // Wi-Fi drops, recovers before 600s -> timer clears.
+    let mut wifi_down = healthy_signals(2, 2);
+    wifi_down.wifi_associated = false;
+    assert_eq!(mon.evaluate(10_000, wifi_down), None);
+    wifi_down.core1_seq = 3;
+    assert_eq!(mon.evaluate(10_000 + NO_IP_RESET_MS - 1, wifi_down), None);
+    assert_eq!(
+        mon.evaluate(10_000 + NO_IP_RESET_MS - 1, healthy_signals(4, 3)),
+        None
+    );
+
+    // Wi-Fi drops again and stays down for full 600s -> NoIp (keep core1 advancing).
+    let t_drop = 10_000 + NO_IP_RESET_MS;
+    let mut seq = 5u32;
+    for sec in 0..600u64 {
+        let now = t_drop + sec * 1_000;
+        seq = seq.wrapping_add(1);
+        let sig = HealthSignals {
+            boot_ready: true,
+            core1_seq: seq,
+            ble_healthy: true,
+            wifi_associated: false,
+            mqtt_seq: 3,
+            ota_flashing: false,
+        };
+        assert_eq!(mon.evaluate(now, sig), None);
+    }
+    seq = seq.wrapping_add(1);
+    let sig_due = HealthSignals {
+        boot_ready: true,
+        core1_seq: seq,
+        ble_healthy: true,
+        wifi_associated: false,
+        mqtt_seq: 3,
+        ota_flashing: false,
+    };
+    assert_eq!(
+        mon.evaluate(t_drop + NO_IP_RESET_MS, sig_due),
+        Some(RebootReason::NoIp)
+    );
+}
+
+#[test]
+fn health_mqtt_outage_and_wraparound() {
+    let mut mon = HealthMonitor::new();
+    assert_eq!(mon.evaluate(0, healthy_signals(1, u32::MAX)), None);
+
+    // Advance mqtt_seq across u32::MAX -> 0 at 300s.
+    assert_eq!(mon.evaluate(300_000, healthy_signals(10, 0)), None);
+
+    // Keep core1 healthy while mqtt_seq stops at 0.
+    let mut core1 = 11u32;
+    for step in 1..6 {
+        core1 = core1.wrapping_add(1);
+        assert_eq!(
+            mon.evaluate(300_000 + step * 100_000, healthy_signals(core1, 0)),
+            None
+        );
+    }
+    assert_eq!(
+        mon.evaluate(
+            300_000 + MQTT_OUTAGE_TIMEOUT_MS - 1,
+            healthy_signals(core1 + 1, 0)
+        ),
+        None
+    );
+    assert_eq!(
+        mon.evaluate(
+            300_000 + MQTT_OUTAGE_TIMEOUT_MS,
+            healthy_signals(core1 + 2, 0)
+        ),
+        Some(RebootReason::MqttOutage)
+    );
+}
+
+#[test]
+fn health_wifi_outage_attributed_to_no_ip_before_mqtt() {
+    let mut mon = HealthMonitor::new();
+    // Both wifi_associated=false and mqtt_seq=1 start at t=1_000; core1 stays alive.
+    for sec in 0..600u64 {
+        let sig = HealthSignals {
+            boot_ready: true,
+            core1_seq: 2 + sec as u32,
+            ble_healthy: true,
+            wifi_associated: false,
+            mqtt_seq: 1,
+            ota_flashing: false,
+        };
+        assert_eq!(mon.evaluate(1_000 + sec * 1_000, sig), None);
+    }
+    let sig_due = HealthSignals {
+        boot_ready: true,
+        core1_seq: 1_000,
+        ble_healthy: true,
+        wifi_associated: false,
+        mqtt_seq: 1,
+        ota_flashing: false,
+    };
+    assert_eq!(
+        mon.evaluate(1_000 + NO_IP_RESET_MS, sig_due),
+        Some(RebootReason::NoIp)
+    );
+}
+
+#[test]
+fn health_priority_order_when_multiple_fail() {
+    // At t=0 all subsystems start healthy-enough to anchor post-boot timers;
+    // ble_healthy starts false so all four post-boot timeouts expire by t=600_000.
+    let mut mon = HealthMonitor::new();
+    let stalled_all = HealthSignals {
+        boot_ready: true,
+        core1_seq: 1,
+        ble_healthy: false,
+        wifi_associated: false,
+        mqtt_seq: 1,
+        ota_flashing: false,
+    };
+    assert_eq!(mon.evaluate(0, stalled_all), None);
+    assert_eq!(
+        mon.evaluate(NO_IP_RESET_MS, stalled_all),
+        Some(RebootReason::BleError)
+    );
+
+    // With BLE healthy, Core1Stall takes precedence over NoIp and MqttOutage.
+    let mut mon2 = HealthMonitor::new();
+    let mut stalled_no_ble = stalled_all;
+    stalled_no_ble.ble_healthy = true;
+    assert_eq!(mon2.evaluate(0, stalled_no_ble), None);
+    assert_eq!(
+        mon2.evaluate(NO_IP_RESET_MS, stalled_no_ble),
+        Some(RebootReason::Core1Stall)
+    );
+}
+
+#[test]
+fn health_ota_flashing_suppresses_resets() {
+    let mut mon = HealthMonitor::new();
+    assert_eq!(mon.evaluate(0, healthy_signals(1, 1)), None);
+
+    // Core1 stops advancing and OTA flash starts before timeout.
+    let mut sig = healthy_signals(1, 1);
+    sig.ota_flashing = true;
+    assert_eq!(mon.evaluate(CORE1_STALL_TIMEOUT_MS - 1_000, sig), None);
+    assert_eq!(mon.evaluate(CORE1_STALL_TIMEOUT_MS, sig), None);
+    assert_eq!(mon.evaluate(CORE1_STALL_TIMEOUT_MS + 30_000, sig), None);
+
+    // If core1 progressed during OTA, clearing ota_flashing does not falsely reset.
+    sig.core1_seq = 2;
+    assert_eq!(mon.evaluate(CORE1_STALL_TIMEOUT_MS + 35_000, sig), None);
+    sig.ota_flashing = false;
+    assert_eq!(mon.evaluate(CORE1_STALL_TIMEOUT_MS + 36_000, sig), None);
+}
+
+#[test]
+fn health_long_ota_flashing_does_not_falsely_stall_core1() {
+    let mut mon = HealthMonitor::new();
+    assert_eq!(mon.evaluate(0, healthy_signals(1, 1)), None);
+
+    // Core1 stays frozen across an ota_flashing window exceeding CORE1_STALL_TIMEOUT_MS.
+    let mut sig = healthy_signals(1, 1);
+    sig.ota_flashing = true;
+    let ota_end = CORE1_STALL_TIMEOUT_MS + 30_000;
+    for t in (1_000..=ota_end).step_by(10_000) {
+        assert_eq!(mon.evaluate(t, sig), None);
+    }
+    assert_eq!(mon.evaluate(ota_end, sig), None);
+
+    // Clearing ota_flashing must NOT spuriously fire Core1Stall on completion;
+    // it only fires if core1 stays stalled for a full CORE1_STALL_TIMEOUT_MS
+    // after OTA completes.
+    sig.ota_flashing = false;
+    assert_eq!(mon.evaluate(ota_end, sig), None);
+    assert_eq!(mon.evaluate(ota_end + 1_000, sig), None);
+    assert_eq!(
+        mon.evaluate(ota_end + CORE1_STALL_TIMEOUT_MS - 1, sig),
+        None
+    );
+    assert_eq!(
+        mon.evaluate(ota_end + CORE1_STALL_TIMEOUT_MS, sig),
+        Some(RebootReason::Core1Stall)
+    );
 }

@@ -11,10 +11,10 @@ use core::time::Duration;
 /// task).
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Total time without an IP lease before a bounded MCU reset is due. This is
-/// the single deliberate exception to "network loss never resets": the device
-/// cannot reach the network in this state anyway, so resetting is safe.
-pub const NO_IP_RESET: Duration = Duration::from_secs(180);
+/// Total time without an IP lease before a bounded MCU reset is due (600 s).
+/// When the station cannot obtain an IP lease for this duration, resetting
+/// recovers a wedged radio or network stack.
+pub const NO_IP_RESET: Duration = Duration::from_secs(600);
 
 /// Consecutive MQTT connect failures before a Wi-Fi rejoin is requested,
 /// covering the "associated but no traffic" case that link state alone never

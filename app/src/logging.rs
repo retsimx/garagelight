@@ -45,6 +45,16 @@ pub fn emit(args: fmt::Arguments<'_>) {
     });
 }
 
+/// Flush any buffered UART0 bytes and wait for the TX shift register to empty.
+pub fn flush() {
+    LOGGER.lock(|cell| {
+        if let Some(logger) = cell.borrow_mut().as_mut() {
+            let _ = logger.tx.blocking_flush();
+            while logger.tx.busy() {}
+        }
+    });
+}
+
 /// Log to defmt and UART0 (no trailing newline on UART).
 #[macro_export]
 macro_rules! log {

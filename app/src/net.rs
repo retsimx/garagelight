@@ -19,11 +19,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use cyw43::{JoinAuth, JoinOptions, NetDriver};
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_net::{Config, ConfigV4, DhcpConfig, Runner, Stack, StackResources};
-use embassy_time::{Duration, Timer};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Instant, Timer};
 use static_cell::StaticCell;
 
 use garagelight_core::wifi::{NoIpWatchdog, JOIN_TIMEOUT};
+use garagelight_core::RebootReason;
 
 use crate::beacon::SharedControl;
 use crate::{logln, secrets};
@@ -44,9 +48,10 @@ const NET_SEED: u64 = 0x1234_5678_9abc_def0;
 /// reflects "currently associated and configured" (GL-11).
 static ASSOCIATED: AtomicBool = AtomicBool::new(false);
 
-/// Set by the telemetry task after repeated MQTT connect failures, to force an
-/// immediate Wi-Fi rejoin (dead-link recovery that link state alone never sees).
-static REJOIN_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Signaled by the telemetry task after repeated MQTT connect failures, to
+/// wake the supervisor out of `wait_link_down()` and force an immediate Wi-Fi
+/// rejoin (dead-link recovery that link state alone never sees).
+static REJOIN_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Whether the station is currently associated with a DHCP-configured address.
 pub fn associated() -> bool {
@@ -56,16 +61,12 @@ pub fn associated() -> bool {
 /// Request a Wi-Fi rejoin (called by the telemetry task after repeated MQTT
 /// connect failures).
 pub fn request_rejoin() {
-    REJOIN_REQUESTED.store(true, Ordering::Relaxed);
+    REJOIN_SIGNAL.signal(());
 }
 
 /// Whether a Wi-Fi rejoin has been requested.
 pub fn rejoin_requested() -> bool {
-    REJOIN_REQUESTED.load(Ordering::Relaxed)
-}
-
-fn clear_rejoin_requested() {
-    REJOIN_REQUESTED.store(false, Ordering::Relaxed);
+    REJOIN_SIGNAL.signaled()
 }
 
 /// Why one join attempt did not succeed.
@@ -86,7 +87,6 @@ async fn join_with(
     control: &'static SharedControl,
     auth: JoinAuth,
 ) -> Result<(), JoinAttemptError> {
-    let mut c = control.lock().await;
     let options = if secrets::WIFI_PASSWORD.is_empty() {
         JoinOptions::new_open()
     } else {
@@ -94,15 +94,40 @@ async fn join_with(
         options.auth = auth;
         options
     };
-    match embassy_time::with_timeout(
-        Duration::from_secs(JOIN_TIMEOUT.as_secs()),
-        c.join(secrets::WIFI_SSID, options),
-    )
+    match embassy_time::with_timeout(Duration::from_secs(JOIN_TIMEOUT.as_secs()), async {
+        let mut c = control.lock().await;
+        c.join(secrets::WIFI_SSID, options).await
+    })
     .await
     {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(JoinAttemptError::Join(e)),
         Err(_) => Err(JoinAttemptError::Timeout),
+    }
+}
+
+/// Bounded `control.leave()` call; lock acquisition is also covered by
+/// [`JOIN_TIMEOUT`] so a contended control channel cannot stall recovery.
+async fn leave_bounded(control: &'static SharedControl) {
+    match embassy_time::with_timeout(Duration::from_secs(JOIN_TIMEOUT.as_secs()), async {
+        let mut c = control.lock().await;
+        c.leave().await;
+    })
+    .await
+    {
+        Ok(()) => logln!("wifi_left"),
+        Err(_) => logln!("wifi_leave_timeout"),
+    }
+}
+
+fn record_and_check_no_ip(no_ip: &mut NoIpWatchdog, since: Instant) {
+    no_ip.record(core::time::Duration::from_millis(
+        since.elapsed().as_millis(),
+    ));
+    if no_ip.is_reset_due() {
+        logln!("wifi_no_ip_reset");
+        no_ip.reset();
+        crate::update::reboot(RebootReason::NoIp);
     }
 }
 
@@ -162,20 +187,36 @@ async fn runner_task(mut runner: Runner<'static, NetDriver<'static>>) -> ! {
     runner.run().await
 }
 
+async fn acquire_dhcp(stack: Stack<'static>) -> bool {
+    if embassy_time::with_timeout(DHCP_TIMEOUT, stack.wait_config_up())
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    logln!("wifi_dhcp_timeout");
+    // Keep the association and re-issue DHCP in place, bounded,
+    // before falling back to a full leave + rejoin.
+    for _ in 0..DHCP_RETRY_ATTEMPTS {
+        stack.set_config_v4(ConfigV4::Dhcp(DhcpConfig::default()));
+        logln!("wifi_dhcp_retry");
+        if embassy_time::with_timeout(DHCP_TIMEOUT, stack.wait_config_up())
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[embassy_executor::task]
 async fn supervisor_task(control: &'static SharedControl, stack: Stack<'static>) -> ! {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
     let mut no_ip = NoIpWatchdog::new();
     loop {
-        // A dead-link rejoin request (from the telemetry task) forces an
-        // immediate rejoin, skipping the backoff wait.
-        let skip_wait = if rejoin_requested() {
-            clear_rejoin_requested();
-            logln!("wifi_rejoin_requested");
-            true
-        } else {
-            false
-        };
+        let mut unassociated_start = Instant::now();
+        let mut skip_wait = false;
 
         ASSOCIATED.store(false, Ordering::Relaxed);
         logln!("wifi_associating ssid={}", secrets::WIFI_SSID);
@@ -197,64 +238,43 @@ async fn supervisor_task(control: &'static SharedControl, stack: Stack<'static>)
         if joined {
             logln!("wifi_associated ssid={}", secrets::WIFI_SSID);
             backoff_secs = BACKOFF_INITIAL_SECS;
-            let mut dhcp_up = false;
-            if embassy_time::with_timeout(DHCP_TIMEOUT, stack.wait_config_up())
-                .await
-                .is_ok()
-            {
-                dhcp_up = true;
-            } else {
-                logln!("wifi_dhcp_timeout");
-                // Keep the association and re-issue DHCP in place, bounded,
-                // before falling back to a full leave + rejoin.
-                for _ in 0..DHCP_RETRY_ATTEMPTS {
-                    stack.set_config_v4(ConfigV4::Dhcp(DhcpConfig::default()));
-                    logln!("wifi_dhcp_retry");
-                    if embassy_time::with_timeout(DHCP_TIMEOUT, stack.wait_config_up())
-                        .await
-                        .is_ok()
-                    {
-                        dhcp_up = true;
-                        break;
-                    }
-                }
-            }
-            if dhcp_up {
+            if acquire_dhcp(stack).await {
+                // Discard any stale rejoin signal posted before this link
+                // finished associating so it cannot immediately tear down a
+                // fresh connection.
+                REJOIN_SIGNAL.reset();
                 if let Some(cfg) = stack.config_v4() {
                     ASSOCIATED.store(true, Ordering::Relaxed);
                     no_ip.reset();
                     let o = cfg.address.address().octets();
                     logln!("wifi_dhcp_up ip={}.{}.{}.{}", o[0], o[1], o[2], o[3]);
                 }
-                stack.wait_link_down().await;
+                let outcome = select(stack.wait_link_down(), REJOIN_SIGNAL.wait()).await;
                 ASSOCIATED.store(false, Ordering::Relaxed);
-                logln!("wifi_lost");
+                unassociated_start = Instant::now();
+                match outcome {
+                    Either::First(()) => logln!("wifi_lost"),
+                    Either::Second(()) => {
+                        logln!("wifi_rejoin_requested");
+                        leave_bounded(control).await;
+                        stack.set_config_v4(ConfigV4::Dhcp(DhcpConfig::default()));
+                        backoff_secs = BACKOFF_INITIAL_SECS;
+                        skip_wait = true;
+                    }
+                }
             } else {
                 logln!("wifi_dhcp_failed");
-                let mut c = control.lock().await;
-                match embassy_time::with_timeout(
-                    Duration::from_secs(JOIN_TIMEOUT.as_secs()),
-                    c.leave(),
-                )
-                .await
-                {
-                    Ok(()) => logln!("wifi_left"),
-                    Err(_) => logln!("wifi_leave_timeout"),
-                }
+                leave_bounded(control).await;
+                stack.set_config_v4(ConfigV4::Dhcp(DhcpConfig::default()));
             }
         }
-        if skip_wait {
-            // Forced rejoin: no backoff wait this iteration.
-        } else {
+        record_and_check_no_ip(&mut no_ip, unassociated_start);
+        if !skip_wait {
             logln!("wifi_retry_in_s={}", backoff_secs);
+            let wait_start = Instant::now();
             Timer::after(Duration::from_secs(backoff_secs)).await;
-            no_ip.record(core::time::Duration::from_secs(backoff_secs));
+            record_and_check_no_ip(&mut no_ip, wait_start);
+            backoff_secs = core::cmp::min(backoff_secs * 2, BACKOFF_MAX_SECS);
         }
-        if no_ip.is_reset_due() {
-            logln!("wifi_no_ip_reset");
-            no_ip.reset();
-            cortex_m::peripheral::SCB::sys_reset();
-        }
-        backoff_secs = core::cmp::min(backoff_secs * 2, BACKOFF_MAX_SECS);
     }
 }

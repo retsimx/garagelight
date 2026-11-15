@@ -75,8 +75,10 @@ async fn sampling_task(pin: Peri<'static, PIN_16>) -> ! {
     // DHT11 datasheet: let the sensor settle after power-up before the first
     // read.
     Timer::after(Duration::from_millis(1000)).await;
+    crate::health::heartbeat_core1();
 
     loop {
+        crate::health::heartbeat_core1();
         let start = Instant::now();
 
         let mut first_attempt = true;

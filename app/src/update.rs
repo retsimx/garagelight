@@ -68,6 +68,24 @@ pub fn feed(timeout: Duration) {
     });
 }
 
+/// Persist `reason` in `WATCHDOG_SCRATCH0`, flush UART logs, and perform a
+/// full RP2040 chip reset via `Watchdog::trigger_reset()`.
+pub fn reboot(reason: garagelight_core::RebootReason) -> ! {
+    logln!("reboot reason={}", reason.as_str());
+    crate::logging::flush();
+    WATCHDOG.lock(|cell| {
+        if let Some(wd) = cell.borrow_mut().as_mut() {
+            wd.set_scratch(0, garagelight_core::encode_scratch(reason));
+            wd.trigger_reset();
+        } else {
+            cortex_m::peripheral::SCB::sys_reset();
+        }
+    });
+    loop {
+        cortex_m::asm::nop();
+    }
+}
+
 /// Longest single blocking flash operation observed, in microseconds (GL-10
 /// D12). This is the worst-case outage during which both cores are parked.
 static MAX_WINDOW_US: AtomicU32 = AtomicU32::new(0);

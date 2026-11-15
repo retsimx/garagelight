@@ -177,6 +177,7 @@ async fn check_and_update(
     logln!("ota_head status={} len={}", head.status, len);
 
     let result = {
+        let _flash_guard = crate::health::OtaFlashGuard::enter();
         let mut body = HttpBody {
             link: &mut link,
             leftover: &leftover[..extra],
@@ -195,7 +196,7 @@ async fn check_and_update(
     logln!("ota_hash_ok");
     logln!("ota_marked resetting");
     logln!("ota_flash_window_max_us={}", update::max_window_us());
-    cortex_m::peripheral::SCB::sys_reset();
+    update::reboot(garagelight_core::RebootReason::OtaSwap);
 }
 
 fn fetch_failed(error: FetchError) -> OtaError {

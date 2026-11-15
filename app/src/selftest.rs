@@ -74,7 +74,7 @@ pub async fn run(updater: &mut update::Updater) {
                 },
                 Verdict::Revert => {
                     logln!("ota_selftest_failed");
-                    cortex_m::peripheral::SCB::sys_reset();
+                    update::reboot(garagelight_core::RebootReason::SelftestRevert);
                 }
             }
         }

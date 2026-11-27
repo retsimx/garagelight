@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
-use trouble_host::att::{AttClient, AttReq};
+use trouble_host::att::{AttClient, AttCmd, AttReq};
 use trouble_host::prelude::*;
 
 use crate::gatt::Server;
@@ -162,42 +162,119 @@ async fn peripheral_task(stack: &'static Stack<'static, BleController, DefaultPa
                 }
                 GattConnectionEvent::Gatt {
                     event: GattEvent::Write(event),
-                } => {
-                    // The characteristic advertises `write_without_response` only,
-                    // so an ATT Write Request (which expects a response) is not a
-                    // permitted procedure. Reject it explicitly; a Write Command
-                    // (`AttClient::Command`) falls through untouched.
-                    if let AttClient::Request(AttReq::Write { .. }) = event.payload().incoming() {
-                        match event.reject(AttErrorCode::WRITE_NOT_PERMITTED) {
-                            Ok(_) => logln!("ble_write_req_rejected"),
-                            Err(_) => logln!("ble_write_req_reject_err"),
-                        }
-                        continue;
-                    }
-                    let (len, first, parsed) = event.with_data(|_offset, data| {
-                        let len = data.len();
-                        let first = data.first().copied();
-                        let parsed = if len == garagelight_core::VALUE_LEN_BYTES {
-                            garagelight_core::validate_write(len, data[0])
-                        } else {
-                            None
-                        };
-                        (len, first, parsed)
-                    });
-                    match parsed {
-                        Some(fact) => match event.accept() {
-                            Ok(_) => {
-                                crate::lamp::post_fact(fact);
-                                logln!("ble_fact value={}", first.unwrap_or(0));
+                } => match event.payload().incoming() {
+                    AttClient::Request(AttReq::Write { .. }) => {
+                        let (len, first, parsed) = event.with_data(|_offset, data| {
+                            let len = data.len();
+                            let first = data.first().copied();
+                            let parsed = if len == garagelight_core::VALUE_LEN_BYTES {
+                                garagelight_core::validate_write(len, data[0])
+                            } else {
+                                None
+                            };
+                            (len, first, parsed)
+                        });
+
+                        match parsed {
+                            Some(fact) => {
+                                crate::health::record_rx_fact();
+                                match event.accept() {
+                                    Ok(reply) => {
+                                        let generation = crate::lamp::post_fact(fact);
+                                        crate::lamp::wait_fact_applied(generation).await;
+                                        logln!("ble_fact value={}", first.unwrap_or(0));
+                                        reply.send().await;
+                                    }
+                                    Err(_) => {
+                                        crate::health::record_ble_error();
+                                        logln!(
+                                            "ble_write_req_accept_err len={} value={:?}",
+                                            len,
+                                            first
+                                        );
+                                    }
+                                }
                             }
-                            Err(_) => logln!("ble_write_apply_err"),
-                        },
-                        None => {
-                            logln!("ble_write_ignored len={} value={:?}", len, first);
-                            let _ = event.accept_unprocessed();
+                            None => {
+                                crate::health::record_ble_error();
+                                let error = if len != garagelight_core::VALUE_LEN_BYTES {
+                                    AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH
+                                } else {
+                                    AttErrorCode::UNLIKELY_ERROR
+                                };
+                                logln!("ble_write_req_rejected len={} value={:?}", len, first);
+                                match event.reject(error) {
+                                    Ok(reply) => reply.send().await,
+                                    Err(_) => {
+                                        crate::health::record_ble_error();
+                                        logln!(
+                                            "ble_write_req_reply_err len={} value={:?}",
+                                            len,
+                                            first
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
-                }
+                    AttClient::Command(AttCmd::Write { .. }) => {
+                        let (len, first, parsed) = event.with_data(|_offset, data| {
+                            let len = data.len();
+                            let first = data.first().copied();
+                            let parsed = if len == garagelight_core::VALUE_LEN_BYTES {
+                                garagelight_core::validate_write(len, data[0])
+                            } else {
+                                None
+                            };
+                            (len, first, parsed)
+                        });
+
+                        match parsed {
+                            Some(fact) => {
+                                crate::health::record_rx_fact();
+                                match event.accept() {
+                                    Ok(reply) => {
+                                        let generation = crate::lamp::post_fact(fact);
+                                        crate::lamp::wait_fact_applied(generation).await;
+                                        logln!("ble_fact value={}", first.unwrap_or(0));
+                                        reply.send().await;
+                                    }
+                                    Err(_) => {
+                                        crate::health::record_ble_error();
+                                        logln!(
+                                            "ble_write_cmd_accept_err len={} value={:?}",
+                                            len,
+                                            first
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                crate::health::record_ble_error();
+                                logln!("ble_write_cmd_unprocessed len={} value={:?}", len, first);
+                                match event.accept_unprocessed() {
+                                    Ok(reply) => reply.send().await,
+                                    Err(_) => {
+                                        crate::health::record_ble_error();
+                                        logln!(
+                                            "ble_write_cmd_reply_err len={} value={:?}",
+                                            len,
+                                            first
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        crate::health::record_ble_error();
+                        logln!("ble_write_unexpected");
+                        match event.accept_unprocessed() {
+                            Ok(reply) => reply.send().await,
+                            Err(_) => logln!("ble_write_unexpected_reply_err"),
+                        }
+                    }
+                },
                 // No application action needed for other events. In particular,
                 // `RequestConnectionParams` is central-only in trouble-host 0.8.0:
                 // it is posted only from the HCI `LeRemoteConnectionParameterRequest`

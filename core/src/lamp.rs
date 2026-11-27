@@ -47,6 +47,48 @@ pub enum LampEvent {
     Tick,
 }
 
+/// Why the lamp is currently in fault mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FaultReason {
+    /// Faulted before the machine received its first fact.
+    Boot,
+    /// The BLE link supervision ended.
+    LinkDown,
+    /// A live link stopped receiving facts for the write leash.
+    Leash,
+    /// No fault is active.
+    None,
+}
+
+impl FaultReason {
+    /// Compact identifier used in diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Boot => "boot",
+            Self::LinkDown => "link_down",
+            Self::Leash => "leash",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Advance a lamp-fact handshake generation without a rollover.
+///
+/// `u64::MAX` is a terminal generation: the app keeps that proof value and
+/// clears the applied proof before posting each later fact, so a stale applied
+/// value can never satisfy a new post.
+pub const fn advance_lamp_generation(current: u64) -> Option<u64> {
+    current.checked_add(1)
+}
+
+/// Exact-match rule for the post-apply ATT Write Response handshake.
+///
+/// The comparison deliberately is not a `>=` range comparison: only the exact
+/// latest fact generation may complete its request.
+pub const fn lamp_generation_applied(applied: u64, requested: u64) -> bool {
+    applied == requested
+}
+
 /// The single-owner fact→lamp machine. `fault` means "state unknown" and drives the
 /// distinctive pattern; otherwise the last applied [`BeamFact`] drives the lamp.
 pub struct LampMachine {
@@ -55,6 +97,8 @@ pub struct LampMachine {
     live: bool,
     last_write_ms: u64,
     fault_since_ms: u64,
+    /// Observable reason for the current fault; `None` after a valid fact.
+    pub fault_reason: FaultReason,
 }
 
 impl LampMachine {
@@ -66,6 +110,7 @@ impl LampMachine {
             live: false,
             last_write_ms: 0,
             fault_since_ms: 0,
+            fault_reason: FaultReason::Boot,
         }
     }
 
@@ -75,6 +120,7 @@ impl LampMachine {
         self.fault = false;
         self.live = true;
         self.last_write_ms = now_ms;
+        self.fault_reason = FaultReason::None;
     }
 
     /// The link ended: no live fact, show the fault pattern from `now_ms`.
@@ -82,6 +128,7 @@ impl LampMachine {
         self.live = false;
         self.fault = true;
         self.fault_since_ms = now_ms;
+        self.fault_reason = FaultReason::LinkDown;
     }
 
     /// A leash tick: fault if a live link has gone quiet for too long.
@@ -92,7 +139,13 @@ impl LampMachine {
         {
             self.fault = true;
             self.fault_since_ms = now_ms;
+            self.fault_reason = FaultReason::Leash;
         }
+    }
+
+    /// Return the reason for the current fault state.
+    pub const fn fault_reason(&self) -> FaultReason {
+        self.fault_reason
     }
 
     /// The lamp level at `now_ms`: the fault pattern while faulted, else the fact.

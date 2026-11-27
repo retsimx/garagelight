@@ -12,6 +12,7 @@ pub struct BeamService {
         uuid = garagelight_core::CHARACTERISTIC_UUID_BYTES,
         value = garagelight_core::INITIAL_READ_VALUE,
         read,
+        write,
         write_without_response
     )]
     pub fact: u8,

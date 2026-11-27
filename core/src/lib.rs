@@ -17,8 +17,8 @@ pub use budget::{fits, ACTIVE_BASE, ACTIVE_FLASH_BYTES, BLOB_TOTAL_BYTES, VERSIO
 pub use contract::{
     validate_write, BeamFact, CHARACTERISTIC_UUID, CHARACTERISTIC_UUID_BYTES, CONN_INTERVAL_US,
     CONN_SLAVE_LATENCY, CONN_SUPERVISION_TIMEOUT_MS, FACT_BROKEN, FACT_INTACT, INITIAL_READ_VALUE,
-    KEEPALIVE_INTERVAL_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID, SERVICE_UUID_BYTES,
-    VALUE_LEN_BYTES,
+    KEEPALIVE_INTERVAL_MS, KEEPALIVE_TIMEOUT_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID,
+    SERVICE_UUID_BYTES, VALUE_LEN_BYTES,
 };
 pub use health::{
     decode_scratch, encode_scratch, HealthMonitor, HealthSignals, RebootReason,
@@ -26,8 +26,9 @@ pub use health::{
     NO_IP_RESET_MS,
 };
 pub use lamp::{
-    fault_level, LampEvent, LampMachine, FAULT_CYCLE_MS, FAULT_OFF1_MS, FAULT_OFF2_MS,
-    FAULT_ON1_MS, FAULT_ON2_MS, LAMP_ON_LEVEL,
+    advance_lamp_generation, fault_level, lamp_generation_applied, FaultReason, LampEvent,
+    LampMachine, FAULT_CYCLE_MS, FAULT_OFF1_MS, FAULT_OFF2_MS, FAULT_ON1_MS, FAULT_ON2_MS,
+    LAMP_ON_LEVEL,
 };
 pub use layout::{
     ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BASE, FLASH_BYTES,
@@ -44,7 +45,9 @@ pub use sensor::{
     SAMPLE_INTERVAL_SECS,
 };
 pub use telemetry::{
-    classify_inbound, encode_sample, parse_broker, Inbound, BROKER_PORT, CLIENT_ID, KEEPALIVE_SECS,
-    MAX_SAMPLE_PAYLOAD, RESET_TOPIC,
+    classify_inbound, diag_publish_due, encode_diag, encode_sample, parse_broker,
+    saturating_counter_next, Inbound, LampDiagnosticSnapshot, BROKER_PORT, CLIENT_ID,
+    DIAG_INTERVAL_MS, DIAG_TOPIC, KEEPALIVE_SECS, MAX_DIAG_PAYLOAD, MAX_SAMPLE_PAYLOAD,
+    RESET_TOPIC,
 };
 pub use wifi::{NoIpWatchdog, RejoinCounter, JOIN_TIMEOUT, NO_IP_RESET, REJOIN_AFTER_FAILURES};

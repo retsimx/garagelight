@@ -19,9 +19,9 @@
 //!   corruption.
 //! - `TX_BYTES = 512` holds the CONNECT workspace (~50 B) + the retained
 //!   SUBSCRIBE (~25 B) + the QoS-0 publish scratch (`MAX_FIXED_HEADER_SIZE` +
-//!   topic + 54-byte payload ~= 82 B) + reconnect headroom. QoS 0 carries no
-//!   replay state, but the SUBSCRIBE is retained until SUBACK; 512 is ~4x the
-//!   worst-case single encode.
+//!   topic + the larger 160-byte diagnostic payload) + reconnect headroom. QoS 0
+//!   carries no replay state, but the SUBSCRIBE is retained until SUBACK; 512 is
+//!   sized for the largest single diagnostic encode and reconnect state.
 
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -29,12 +29,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{IpAddress, IpEndpoint, Stack};
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use minimq::{Buffers, ConfigBuilder, ConnectEvent, Publication, QoS, Session, TopicFilter};
 
 use garagelight_core::contract::MQTT_TOPIC;
 use garagelight_core::telemetry::{
-    self, classify_inbound, encode_sample, Inbound, KEEPALIVE_SECS, MAX_SAMPLE_PAYLOAD, RESET_TOPIC,
+    self, classify_inbound, diag_publish_due, encode_diag, encode_sample, Inbound,
+    LampDiagnosticSnapshot, DIAG_INTERVAL_MS, DIAG_TOPIC, KEEPALIVE_SECS, MAX_DIAG_PAYLOAD,
+    MAX_SAMPLE_PAYLOAD, RESET_TOPIC,
 };
 use garagelight_core::wifi::RejoinCounter;
 
@@ -136,6 +138,20 @@ fn record_mqtt_liveness(session_healthy: &mut bool, poll_ticks: &mut u32) {
     crate::health::heartbeat_mqtt();
     *session_healthy = true;
     *poll_ticks = 0;
+}
+
+fn diagnostic_snapshot(fault_entries: u32) -> LampDiagnosticSnapshot<'static> {
+    LampDiagnosticSnapshot::new(
+        crate::VERSION,
+        Instant::now().as_millis() / 1000,
+        crate::health::rx_facts(),
+        crate::health::lamp_applied(),
+        fault_entries,
+        crate::lamp::fault_reason(),
+        crate::health::ble_errs(),
+        crate::health::reset_reason(),
+        crate::health::reboot_reason(),
+    )
 }
 
 /// Open one TCP connection, handshake, subscribe (on a fresh session) and drive
@@ -243,7 +259,47 @@ async fn run_session(session: &mut Session<'_>, stack: Stack<'static>) -> Result
 
     let mut session_healthy = false;
     let mut poll_ticks: u32 = 0;
+    let mut diag_period_started = Instant::now();
+    let mut last_diag_fault_entries = crate::health::fault_entries();
+    let mut diag_initial_pending = true;
     loop {
+        let fault_entries = crate::health::fault_entries();
+        let elapsed_period_ms = diag_period_started.elapsed().as_millis();
+        let periodic_due = elapsed_period_ms >= DIAG_INTERVAL_MS;
+        if diag_initial_pending
+            || diag_publish_due(elapsed_period_ms, last_diag_fault_entries, fault_entries)
+        {
+            let snapshot = diagnostic_snapshot(fault_entries);
+            let mut payload = [0u8; MAX_DIAG_PAYLOAD];
+            let len = encode_diag(snapshot, &mut payload).ok_or_else(|| {
+                logln!("mqtt_diag_encode_failed");
+                "diag_encode_failed"
+            })?;
+            let publication = Publication::new(DIAG_TOPIC, &payload[..len]).qos(QoS::AtMostOnce);
+            match with_timeout(IO_TIMEOUT, conn.publish(publication)).await {
+                Ok(Ok(_)) => {
+                    record_mqtt_liveness(&mut session_healthy, &mut poll_ticks);
+                    diag_initial_pending = false;
+                    last_diag_fault_entries = fault_entries;
+                    if periodic_due {
+                        diag_period_started = Instant::now();
+                    }
+                }
+                Ok(Err(minimq::PubError::Session(minimq::Error::Disconnected))) => {
+                    logln!("mqtt_disconnected");
+                    return Ok(session_healthy);
+                }
+                Ok(Err(_)) => {
+                    logln!("mqtt_diag_publish_failed");
+                    return Err("diag_publish");
+                }
+                Err(_) => {
+                    logln!("mqtt_diag_publish_timeout");
+                    return Err("diag_publish_timeout");
+                }
+            }
+        }
+
         match with_timeout(TICK, conn.poll()).await {
             Ok(Ok(Some(msg))) => {
                 record_mqtt_liveness(&mut session_healthy, &mut poll_ticks);

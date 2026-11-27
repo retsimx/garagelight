@@ -8,8 +8,8 @@ use crate::budget::{fits, ACTIVE_FLASH_BYTES, BLOB_TOTAL_BYTES, VERSION};
 use crate::contract::{
     validate_write, BeamFact, CHARACTERISTIC_UUID, CHARACTERISTIC_UUID_BYTES, CONN_INTERVAL_US,
     CONN_SLAVE_LATENCY, CONN_SUPERVISION_TIMEOUT_MS, FACT_BROKEN, FACT_INTACT, INITIAL_READ_VALUE,
-    KEEPALIVE_INTERVAL_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID, SERVICE_UUID_BYTES,
-    VALUE_LEN_BYTES,
+    KEEPALIVE_INTERVAL_MS, KEEPALIVE_TIMEOUT_MS, LEASH_TIMEOUT_MS, MQTT_TOPIC, SERVICE_UUID,
+    SERVICE_UUID_BYTES, VALUE_LEN_BYTES,
 };
 use crate::health::{
     decode_scratch, encode_scratch, HealthMonitor, HealthSignals, RebootReason,
@@ -17,8 +17,8 @@ use crate::health::{
     NO_IP_RESET_MS,
 };
 use crate::lamp::{
-    fault_level, LampEvent, LampMachine, FAULT_CYCLE_MS, FAULT_OFF1_MS, FAULT_OFF2_MS,
-    FAULT_ON1_MS, FAULT_ON2_MS,
+    advance_lamp_generation, fault_level, lamp_generation_applied, FaultReason, LampEvent,
+    LampMachine, FAULT_CYCLE_MS, FAULT_OFF1_MS, FAULT_OFF2_MS, FAULT_ON1_MS, FAULT_ON2_MS,
 };
 use crate::layout::{
     ACTIVE_BASE, ACTIVE_BYTES, BOOTLOADER_BASE, BOOTLOADER_BYTES, DFU_BASE, DFU_BYTES, FLASH_BYTES,
@@ -34,7 +34,9 @@ use crate::sensor::{
     SAMPLE_INTERVAL_SECS,
 };
 use crate::telemetry::{
-    classify_inbound, encode_sample, parse_broker, Inbound, MAX_SAMPLE_PAYLOAD,
+    classify_inbound, diag_publish_due, encode_diag, encode_sample, parse_broker,
+    saturating_counter_next, Inbound, LampDiagnosticSnapshot, DIAG_INTERVAL_MS, DIAG_TOPIC,
+    MAX_DIAG_PAYLOAD, MAX_SAMPLE_PAYLOAD,
 };
 use crate::wifi::{NoIpWatchdog, RejoinCounter, NO_IP_RESET, REJOIN_AFTER_FAILURES};
 
@@ -50,6 +52,7 @@ struct ContractFile {
     conn_slave_latency: u16,
     conn_supervision_timeout_ms: u32,
     keepalive_interval_ms: u32,
+    keepalive_timeout_ms: u32,
     leash_timeout_ms: u32,
     mqtt_topic: String,
 }
@@ -73,6 +76,8 @@ fn contract_constants_match_file() {
     assert_eq!(CONN_SLAVE_LATENCY, c.conn_slave_latency);
     assert_eq!(CONN_SUPERVISION_TIMEOUT_MS, c.conn_supervision_timeout_ms);
     assert_eq!(KEEPALIVE_INTERVAL_MS, c.keepalive_interval_ms);
+    assert_eq!(KEEPALIVE_TIMEOUT_MS, c.keepalive_timeout_ms);
+    assert_eq!(KEEPALIVE_TIMEOUT_MS, 3000);
     assert_eq!(LEASH_TIMEOUT_MS, c.leash_timeout_ms);
     assert_eq!(MQTT_TOPIC, c.mqtt_topic.as_str());
 }
@@ -201,6 +206,41 @@ fn lamp_machine_scripted_timeline() {
 }
 
 #[test]
+fn lamp_machine_fault_reasons_are_exact_and_clear_on_fact() {
+    let mut m = LampMachine::new();
+    assert_eq!(m.fault_reason(), FaultReason::Boot);
+    assert_eq!(m.fault_reason, FaultReason::Boot);
+
+    m.apply(LampEvent::Fact(BeamFact::Intact), 1000);
+    assert_eq!(m.fault_reason(), FaultReason::None);
+    assert_eq!(m.fault_reason, FaultReason::None);
+
+    m.apply(LampEvent::LinkDown, 2000);
+    assert_eq!(m.fault_reason(), FaultReason::LinkDown);
+    assert_eq!(m.fault_reason, FaultReason::LinkDown);
+
+    m.apply(LampEvent::Fact(BeamFact::Broken), 3000);
+    assert_eq!(m.fault_reason(), FaultReason::None);
+
+    m.apply(LampEvent::Tick, 32_998);
+    assert_eq!(m.fault_reason(), FaultReason::None);
+    m.apply(LampEvent::Tick, 33_000);
+    assert_eq!(m.fault_reason(), FaultReason::Leash);
+}
+
+#[test]
+fn lamp_generation_sequence_is_terminal_at_u64_max() {
+    assert_eq!(advance_lamp_generation(0), Some(1));
+    assert_eq!(advance_lamp_generation(1), Some(2));
+    assert_eq!(advance_lamp_generation(u64::MAX - 1), Some(u64::MAX));
+    assert_eq!(advance_lamp_generation(u64::MAX), None);
+
+    assert!(lamp_generation_applied(u64::MAX, u64::MAX));
+    assert!(!lamp_generation_applied(u64::MAX - 1, u64::MAX));
+    assert!(!lamp_generation_applied(0, u64::MAX));
+}
+
+#[test]
 fn lamp_machine_leash_faults_at_exactly_30s() {
     let leash = u64::from(LEASH_TIMEOUT_MS);
     let mut m = LampMachine::new();
@@ -248,7 +288,11 @@ fn late_tick_does_not_overwrite_fresh_fact() {
 fn invariants_and_budget() {
     let leash = LEASH_TIMEOUT_MS;
     let keepalive = KEEPALIVE_INTERVAL_MS;
+    let acknowledgement_timeout = KEEPALIVE_TIMEOUT_MS;
+    assert_eq!(KEEPALIVE_TIMEOUT_MS, 3000);
+    assert!(keepalive > acknowledgement_timeout);
     assert!(leash > keepalive);
+    assert!(leash > acknowledgement_timeout);
     assert!(fits(ACTIVE_FLASH_BYTES));
     assert!(!fits(ACTIVE_FLASH_BYTES + 1));
     assert!(fits(BLOB_TOTAL_BYTES));
@@ -631,6 +675,88 @@ fn telemetry_encode_sample_exact_buffer_and_one_byte_short() {
     assert_eq!(encode_sample(sample, 8, &mut short[..len - 1]), None);
     assert_eq!(encode_sample(sample, 8, &mut short[..len]), Some(len));
     assert_eq!(encode_sample(sample, 8, &mut []), None);
+}
+
+#[test]
+fn telemetry_encode_diag_exact_compact_json() {
+    assert_eq!(DIAG_TOPIC, "garagelight/diag");
+    let snapshot = LampDiagnosticSnapshot::new(
+        12,
+        123,
+        42,
+        42,
+        1,
+        FaultReason::Leash,
+        0,
+        "power-on-or-debugger",
+        "none",
+    );
+    let mut out = [0u8; MAX_DIAG_PAYLOAD];
+    let len = encode_diag(snapshot, &mut out).expect("diag fits in MAX_DIAG_PAYLOAD");
+    assert_eq!(
+        &out[..len],
+        br#"{"v":12,"up_s":123,"rx":42,"app":42,"flt":1,"why":"leash","ble_err":0,"rst":"power-on-or-debugger","reb":"none"}"#
+    );
+    assert!(len <= 160);
+    assert!(!out[..len].contains(&b'.'), "diag JSON must not use floats");
+}
+
+#[test]
+fn telemetry_encode_diag_respects_exact_buffer_and_saturating_maximums() {
+    let snapshot = LampDiagnosticSnapshot {
+        v: u32::MAX,
+        up_s: u64::MAX,
+        rx: u32::MAX,
+        app: u32::MAX,
+        flt: u32::MAX,
+        why: FaultReason::LinkDown,
+        ble_err: u32::MAX,
+        rst: "not-a-reset",
+        reb: "not-a-reboot",
+    };
+
+    let mut too_short = [0u8; 159];
+    assert_eq!(encode_diag(snapshot, &mut too_short), None);
+
+    let mut at_bound = [0u8; MAX_DIAG_PAYLOAD];
+    assert_eq!(encode_diag(snapshot, &mut at_bound), None);
+
+    assert_eq!(saturating_counter_next(0), 1);
+    assert_eq!(saturating_counter_next(u32::MAX - 1), u32::MAX);
+    assert_eq!(saturating_counter_next(u32::MAX), u32::MAX);
+}
+
+#[test]
+fn telemetry_diag_publication_due_at_60_seconds_or_fault_change() {
+    assert_eq!(DIAG_INTERVAL_MS, 60_000);
+    assert!(!diag_publish_due(DIAG_INTERVAL_MS - 1, 1, 1));
+    assert!(diag_publish_due(DIAG_INTERVAL_MS, 1, 1));
+    assert!(diag_publish_due(0, 1, 2));
+    assert!(!diag_publish_due(0, 2, 2));
+}
+
+#[test]
+fn telemetry_diag_maps_counter_reset_and_fault_fields_exactly() {
+    let snapshot = LampDiagnosticSnapshot::new(
+        11,
+        720,
+        9,
+        9,
+        2,
+        FaultReason::LinkDown,
+        3,
+        "watchdog-forced",
+        "mqtt-outage",
+    );
+    let mut out = [0u8; MAX_DIAG_PAYLOAD];
+    let len = encode_diag(snapshot, &mut out).expect("diagnostic snapshot fits");
+
+    assert_eq!(
+        &out[..len],
+        br#"{"v":11,"up_s":720,"rx":9,"app":9,"flt":2,"why":"link_down","ble_err":3,"rst":"watchdog-forced","reb":"mqtt-outage"}"#
+    );
+    assert!(len <= MAX_DIAG_PAYLOAD);
+    assert_eq!(MQTT_TOPIC, "garage/temperature");
 }
 
 #[test]

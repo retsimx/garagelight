@@ -15,10 +15,13 @@ pub const CONN_INTERVAL_US: u32 = 7_500;
 pub const CONN_SLAVE_LATENCY: u16 = 0;
 pub const CONN_SUPERVISION_TIMEOUT_MS: u32 = 8_000;
 pub const KEEPALIVE_INTERVAL_MS: u32 = 10_000;
+pub const KEEPALIVE_TIMEOUT_MS: u32 = 3_000;
 pub const LEASH_TIMEOUT_MS: u32 = 30_000;
 pub const MQTT_TOPIC: &str = "garage/temperature";
 
+const _: () = assert!(KEEPALIVE_TIMEOUT_MS < KEEPALIVE_INTERVAL_MS);
 const _: () = assert!(LEASH_TIMEOUT_MS > KEEPALIVE_INTERVAL_MS);
+const _: () = assert!(LEASH_TIMEOUT_MS > KEEPALIVE_TIMEOUT_MS);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BeamFact {

@@ -33,6 +33,8 @@ async fn main(spawner: Spawner) {
     };
     let sw_reason = garagelight_core::decode_scratch(wd.get_scratch(0));
     wd.set_scratch(0, 0);
+    health::set_reset_reason(reset_reason);
+    health::set_reboot_reason(sw_reason);
 
     logln!("garagelight version={}", garagelight_app::VERSION);
     logln!("reset_reason={}", reset_reason);

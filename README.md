@@ -84,8 +84,8 @@ cargo build --release --target thumbv6m-none-eabi
 
 The firmware version is the single bare integer in the repo-root `VERSION` file, which
 `app/build.rs` reads and injects as `GARAGELIGHT_BUILD_VERSION`; the running firmware reports
-it in the boot log. The build fails if `VERSION` is not a bare integer, or if
-`app/src/secrets.rs` is absent (the error names the `cp` above).
+it in the boot log. This release sets `VERSION` to `12`. The build fails if `VERSION` is
+not a bare integer, or if `app/src/secrets.rs` is absent (the error names the `cp` above).
 
 Measure the image against the 780 KiB (798,720 B) ACTIVE budget; CI enforces the same gate
 (`cargo size` on `garagelight-app`, failing above 798,720 B):
@@ -404,16 +404,22 @@ path is independent of WiFi.
 
 - **GATT contract** — `app/src/gatt.rs` defines the beam service from the shared contract:
   service `6a4c0001-b5a3-4f1e-9c2d-7e8f9a0b1c2d`, characteristic
-  `6a4c0002-b5a3-4f1e-9c2d-7e8f9a0b1c2d` (`read` + `write_without_response`, 1 byte:
+  `6a4c0002-b5a3-4f1e-9c2d-7e8f9a0b1c2d` (`read` + `write` + `write_without_response`, 1 byte:
   `0x00` intact / `0x01` broken, initial `0x00`). The UUIDs and value rules come from
   `contract.toml` via `core/src/contract.rs`.
 - **Advertising** — `app/src/ble.rs` advertises as `glgt` (connectable scannable
   undirected), interval 30 ms, with the 128-bit service UUID in the advertising data and
   appearance `GENERIC_POWER_DEVICE`. After a disconnect it re-advertises automatically.
-- **Write handling** — a valid write is enqueued to the control path as a
-  `LampEvent::Fact` on the `EVENTS` channel in `app/src/lamp.rs`; every connection-end path
-  enqueues `LampEvent::LinkDown`. Invalid length/value writes and ATT Write Requests are
-  ignored and logged.
+- **Write handling** — a valid ATT Write Command (beam edges and resync) is accepted and posted
+  with no application reply. A valid ATT Write Request is the acknowledged steady-state keepalive:
+  it is posted to the lamp, applied before an ATT Write Response is sent, and the ACK timeout is
+  bounded by the garagebeam contract at `3000 ms` (`KEEPALIVE_TIMEOUT_MS`), before the 10 s
+  keepalive interval and 30 s write leash. Wrong-length requests reject with
+  `INVALID_ATTRIBUTE_VALUE_LENGTH`; invalid one-byte request values reject with `UNLIKELY_ERROR`.
+  Invalid Write Commands are consumed with `accept_unprocessed` and make no lamp-state change.
+- **Latest state** — valid facts and link-loss state use a critical-section latest-state slot plus
+  a `Signal` in `app/src/lamp.rs`; stale facts cannot fill or block a queue. `lamp_applied` is
+  counted only after the lamp owner drives GPIO28 for the fact.
 - **Not done** — the peripheral never initiates a connection-parameter update, and there is
   no pairing, encryption or bonding.
 
@@ -425,13 +431,14 @@ fault indication.
 - **Mapping** — `0x01` (broken) lights the lamp, `0x00` (intact) darkens it.
 - **Fault pattern** — a 2 s cycle, ~85 % lit (`1500` on / `150` off / `200` on / `150` off
   ms, 1 flash/s), shown at boot, on link loss (≤ 1 s supervision timeout) and on a 30 s
-  write-leash while connected. `app/src/ble.rs` enqueues `LampEvent::Fact`/`LinkDown`, and a
-  20 ms `Tick` keeps the leash current.
+  write-leash while connected. `app/src/lamp.rs` consumes latest facts and link-loss state and
+  keeps the leash current with the lamp task's tick loop.
 - **Single owner** — one state machine (`core/src/lamp.rs`, pure, host-tested with an
   injected clock) owns GPIO28 and consumes every event in `app/src/lamp.rs`.
-- **High-priority apply** — the owner runs on an `InterruptExecutor` (`SWI_IRQ_0`,
-  `Priority::P2`) so the apply preempts the radio runner; the fault tick is a separate
-  lower-priority core0 task that never touches the pin.
+- **High-priority apply** — the lamp owner runs on an `InterruptExecutor` (`SWI_IRQ_0`,
+  `Priority::P2`) so fact application preempts the radio runner. It uses 20 ms ticks while a
+  fault is active and 1 s ticks while the lamp is live, with no separate timer task or second
+  GPIO28 writer.
 - **Polarity unverified** — `LAMP_ON_LEVEL` (`true`, active-high) is a single constant; no
   lamp is attached to the prototype, so the wiring polarity is confirmed at cutover.
 
@@ -467,10 +474,17 @@ bounded watchdog reset.
   `:port` defaulting to 1883 (`core/src/telemetry.rs`). It accepts
   `mqtt://IP:1883`, `IP:1883`, or a plain `IP`. Hostnames are rejected because the firmware
   has no DNS; the example value is `mqtt://CHANGE_ME:1883`.
-- **Publish** — topic `garage/temperature` (from `contract.toml` via
-  `core/src/contract.rs`), payload `{"temp": <int>, "humidity": <int>, "version": <int>}`
+- **Publish** — the unchanged topic `garage/temperature` (from `contract.toml` via
+  `core/src/contract.rs`) keeps payload `{"temp": <int>, "humidity": <int>, "version": <int>}`
   (`core/src/telemetry.rs`), **QoS 0**, published once per fresh DHT11 sample (every
   15 s; `core/src/sensor.rs`). A failed sensor read signals nothing and is not published.
+  For this release the `version` value is `12` from `garagelight_app::VERSION`.
+- **Diagnostics** — independent topic `garagelight/diag` publishes compact JSON **QoS 0**,
+  immediately after a usable MQTT session and every `60 s`, and immediately when
+  `fault_entries` changes. The exact fields are `v`, `up_s`, `rx`, `app`, `flt`, `why`,
+  `ble_err`, `rst`, and `reb`; `v` is `garagelight_app::VERSION` (12 in this release),
+  `why` is `boot|link_down|leash|none`, and reset/reboot strings are allow-listed. Payloads
+  are bounded to 160 bytes and are not retained.
 - **Subscribe** — `garagelight/reset` (`core/src/telemetry.rs`); any message on that
   exact topic logs `mqtt_reset_received` and calls `update::request_check()`
   (`app/src/update.rs`), which logs `ota_check_requested` and triggers an OTA check via
@@ -497,8 +511,11 @@ bounded watchdog reset.
 `<broker>`:
 
 ```sh
-# Observe the ~15 s cadence and payload.
+# Observe the unchanged ~15 s temperature cadence and payload.
 mosquitto_sub -h <broker> -t garage/temperature -v -V mqttv5
+
+# Observe the 60 s / fault-change compact diagnostic payload.
+mosquitto_sub -h <broker> -t garagelight/diag -v -V mqttv5
 
 # Trigger the reset path; the device log then shows
 # mqtt_reset_received and ota_check_requested.
